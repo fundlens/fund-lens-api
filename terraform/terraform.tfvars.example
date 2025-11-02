@@ -1,0 +1,57 @@
+# ==============================================================================
+# Remote State Configuration
+# ==============================================================================
+# These values point to your shared infrastructure's Terraform state in Azure Blob Storage
+
+shared_infra_storage_account  = "yourstorageaccount"
+shared_infra_container        = "tfstate"
+shared_infra_key              = "shared-infrastructure.tfstate"
+shared_infra_resource_group   = "your-shared-rg"
+
+# ==============================================================================
+# Project Configuration
+# ==============================================================================
+
+project_name = "fund-lens-api"
+environment  = "dev"  # Options: dev, staging, prod
+
+# ==============================================================================
+# Container Configuration
+# ==============================================================================
+# Image tag only - ACR details come from shared infrastructure remote state
+# Format: repository-name:version-tag
+
+container_image_tag = "fund-lens-api:v1.0.0"
+container_port      = 8000
+
+# ==============================================================================
+# Container Resources
+# ==============================================================================
+# CPU allocation in cores (minimum: 0.25, maximum: 4.0)
+# Memory allocation (minimum: 0.5Gi, maximum: 8Gi)
+
+cpu    = 0.5
+memory = "1Gi"
+
+# ==============================================================================
+# Scaling Configuration
+# ==============================================================================
+# Set both to 1 for single instance (no autoscaling)
+# Set min to 0 to scale to zero when idle (save costs)
+
+min_replicas = 1
+max_replicas = 1
+
+# ==============================================================================
+# Application Environment Variables
+# ==============================================================================
+# Environment variables passed to your FastAPI application
+# Add all configuration your app needs (database URLs, API keys, etc.)
+
+app_env_vars = {
+  DATABASE_URL = "postgresql://username:password@yourdb.postgres.database.azure.com:5432/fundlens"
+  LOG_LEVEL    = "info"
+  # Add more environment variables as needed
+  # API_KEY = "your-api-key"
+  # REDIS_URL = "redis://your-redis:6379"
+}
