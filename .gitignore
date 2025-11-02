@@ -1,0 +1,29 @@
+# Python-specific files and directories
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+
+# Operating System and Editor files
+.DS_Store
+.vscode/
+.idea/
+
+# FastAPI and web development specific
+*.log
+*.sqlite3
+instance/ # If using Flask-style instance folder for config/db
+tmp/
+uploads/ # If handling file uploads
+
+# Environment variables
+.env
+.env.local
+.env.production
