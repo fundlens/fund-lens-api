@@ -12,6 +12,7 @@ from fund_lens_api.schemas.committee import (
     CommitteeFilters,
     CommitteeList,
     CommitteeStats,
+    CommitteeWithStats,
 )
 from fund_lens_api.schemas.common import PaginatedResponse, PaginationParams, create_pagination_meta
 from fund_lens_api.services.committee import CommitteeService
@@ -20,14 +21,15 @@ router = APIRouter(prefix="/committees", tags=["committees"])
 
 
 # noinspection PyUnusedLocal
-@router.get("", response_model=PaginatedResponse[CommitteeList])
+@router.get("", response_model=PaginatedResponse[CommitteeWithStats] | PaginatedResponse[CommitteeList])
 @limiter.limit(RATE_LIMIT_DEFAULT)
 def list_committees(
         request: Request,
         db: DBSession,
         pagination: Annotated[PaginationParams, Depends()],
         filters: Annotated[CommitteeFilters, Depends()],
-) -> PaginatedResponse[CommitteeList]:
+        include_stats: Annotated[bool, Query(description="Include fundraising statistics")] = False,
+) -> PaginatedResponse[CommitteeWithStats] | PaginatedResponse[CommitteeList]:
     """List committees with pagination and filtering.
 
     Supports filtering by:
@@ -36,22 +38,63 @@ def list_committees(
     - party: Political party
     - is_active: Active status
     - candidate_id: Associated candidate ID
+    - include_stats: Include aggregated fundraising statistics (default: false)
     """
     committees, total_count = CommitteeService.list_committees(
         db=db,
         filters=filters,
         offset=pagination.offset,
         limit=pagination.page_size,
+        include_stats=include_stats,
     )
 
-    return PaginatedResponse(
-        items=[CommitteeList.model_validate(c) for c in committees],
-        meta=create_pagination_meta(
-            page=pagination.page,
-            page_size=pagination.page_size,
-            total_items=total_count,
-        ),
-    )
+    if include_stats:
+        # committees will be tuples of (committee, stats_dict)
+        items = []
+        for committee, stats_data in committees:
+            committee_dict = {
+                "id": committee.id,
+                "name": committee.name,
+                "committee_type": committee.committee_type,
+                "party": committee.party,
+                "state": committee.state,
+                "city": committee.city,
+                "is_active": committee.is_active,
+                "candidate_id": committee.candidate_id,
+            }
+
+            # Add stats if available
+            if stats_data:
+                stats = CommitteeStats(
+                    committee_id=committee.id,
+                    total_contributions_received=stats_data.get("total_contributions_received", 0),
+                    total_amount_received=float(stats_data.get("total_amount_received", 0)),
+                    unique_contributors=stats_data.get("unique_contributors", 0),
+                    avg_contribution=float(stats_data.get("avg_contribution", 0)),
+                )
+                committee_dict["stats"] = stats
+            else:
+                committee_dict["stats"] = None
+
+            items.append(CommitteeWithStats(**committee_dict))
+
+        return PaginatedResponse(
+            items=items,
+            meta=create_pagination_meta(
+                page=pagination.page,
+                page_size=pagination.page_size,
+                total_items=total_count,
+            ),
+        )
+    else:
+        return PaginatedResponse(
+            items=[CommitteeList.model_validate(c) for c in committees],
+            meta=create_pagination_meta(
+                page=pagination.page,
+                page_size=pagination.page_size,
+                total_items=total_count,
+            ),
+        )
 
 
 # noinspection PyUnusedLocal

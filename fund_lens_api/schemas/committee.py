@@ -63,3 +63,11 @@ class CommitteeStats(BaseModel):
     avg_contribution: float = Field(description="Average contribution amount")
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class CommitteeWithStats(CommitteeList):
+    """Committee with optional embedded statistics."""
+
+    stats: CommitteeStats | None = Field(
+        default=None, description="Aggregated fundraising statistics"
+    )

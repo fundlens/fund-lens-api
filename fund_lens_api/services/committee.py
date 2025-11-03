@@ -19,33 +19,107 @@ class CommitteeService:
             filters: CommitteeFilters,
             offset: int = 0,
             limit: int = 50,
-    ) -> tuple[list[GoldCommittee], int]:
+            include_stats: bool = False,
+    ) -> tuple[list[GoldCommittee] | list[tuple[GoldCommittee, dict]], int]:
         """List committees with filtering and pagination.
+
+        Args:
+            db: Database session
+            filters: Committee filters
+            offset: Pagination offset
+            limit: Pagination limit
+            include_stats: Include aggregated statistics for each committee
 
         Returns:
             Tuple of (committees list, total count)
+            If include_stats=True, committees are tuples of (committee, stats_dict)
         """
         # Build base query
-        query = select(GoldCommittee)
-        count_query = select(func.count()).select_from(GoldCommittee)
-
-        # Apply filters
         filter_dict = filters.to_filter_dict()
-        for field, value in filter_dict.items():
-            column = cast(InstrumentedAttribute[Any], getattr(GoldCommittee, field))
-            query = query.where(column == value)
-            count_query = count_query.where(column == value)
 
-        # Get total count
-        total_count = db.execute(count_query).scalar_one()
+        if include_stats:
+            # Build stats subquery
+            stats_subquery = (
+                select(
+                    GoldContribution.recipient_committee_id.label("committee_id"),
+                    func.count(GoldContribution.id).label("total_contributions_received"),
+                    func.coalesce(func.sum(GoldContribution.amount), 0).label("total_amount_received"),
+                    func.count(func.distinct(GoldContribution.contributor_id)).label(
+                        "unique_contributors"
+                    ),
+                    func.coalesce(func.avg(GoldContribution.amount), 0).label("avg_contribution"),
+                )
+                .group_by(GoldContribution.recipient_committee_id)
+                .subquery()
+            )
 
-        # Apply pagination and ordering
-        query = query.order_by(GoldCommittee.name).offset(offset).limit(limit)
+            # Main query with LEFT JOIN to stats
+            query = (
+                select(
+                    GoldCommittee,
+                    stats_subquery.c.total_contributions_received,
+                    stats_subquery.c.total_amount_received,
+                    stats_subquery.c.unique_contributors,
+                    stats_subquery.c.avg_contribution,
+                )
+                .outerjoin(stats_subquery, GoldCommittee.id == stats_subquery.c.committee_id)
+            )
 
-        # Execute query
-        committees = db.execute(query).scalars().all()
+            # Apply filters
+            for field, value in filter_dict.items():
+                column = cast(InstrumentedAttribute[Any], getattr(GoldCommittee, field))
+                query = query.where(column == value)
 
-        return list(committees), total_count
+            # Get total count (without stats join)
+            count_query = select(func.count()).select_from(GoldCommittee)
+            for field, value in filter_dict.items():
+                column = cast(InstrumentedAttribute[Any], getattr(GoldCommittee, field))
+                count_query = count_query.where(column == value)
+            total_count = db.execute(count_query).scalar_one()
+
+            # Apply pagination and ordering
+            query = query.order_by(GoldCommittee.name).offset(offset).limit(limit)
+
+            # Execute query
+            results = db.execute(query).all()
+
+            # Build response with committees and stats
+            committees_with_stats = []
+            for row in results:
+                committee = row[0]
+                stats_dict = None
+                if row[1] is not None:  # If stats exist
+                    stats_dict = {
+                        "total_contributions_received": row[1],
+                        "total_amount_received": row[2],
+                        "unique_contributors": row[3],
+                        "avg_contribution": row[4],
+                    }
+                committees_with_stats.append((committee, stats_dict))
+
+            return committees_with_stats, total_count
+
+        else:
+            # Regular query without stats
+            query = select(GoldCommittee)
+            count_query = select(func.count()).select_from(GoldCommittee)
+
+            # Apply filters
+            for field, value in filter_dict.items():
+                column = cast(InstrumentedAttribute[Any], getattr(GoldCommittee, field))
+                query = query.where(column == value)
+                count_query = count_query.where(column == value)
+
+            # Get total count
+            total_count = db.execute(count_query).scalar_one()
+
+            # Apply pagination and ordering
+            query = query.order_by(GoldCommittee.name).offset(offset).limit(limit)
+
+            # Execute query
+            committees = db.execute(query).scalars().all()
+
+            return list(committees), total_count
 
     @staticmethod
     def get_committee_by_id(
