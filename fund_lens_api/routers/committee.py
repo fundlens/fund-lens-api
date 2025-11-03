@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from fund_lens_api.dependencies import DBSession
 from fund_lens_api.rate_limit import RATE_LIMIT_DEFAULT, RATE_LIMIT_SEARCH, RATE_LIMIT_STATS, limiter
+from fund_lens_api.schemas.candidate import CandidateList
 from fund_lens_api.schemas.committee import (
     CommitteeDetail,
     CommitteeFilters,
@@ -61,14 +62,31 @@ def search_committees(
         db: DBSession,
         q: Annotated[str, Query(min_length=1, max_length=500, description="Search query")],
         pagination: Annotated[PaginationParams, Depends()],
+        state: Annotated[str | None, Query(max_length=2, description="Filter by state")] = None,
+        committee_type: Annotated[
+            str | None, Query(description="Filter by committee type (PAC, PARTY, CANDIDATE, etc.)")
+        ] = None,
+        party: Annotated[
+            str | None, Query(description="Filter by party (DEM, REP, etc.)")
+        ] = None,
+        is_active: Annotated[bool | None, Query(description="Filter by active status")] = None,
 ) -> PaginatedResponse[CommitteeList]:
-    """Search committees by name.
+    """Search committees by name with advanced filtering.
 
-    Performs case-insensitive partial matching on committee names.
+    Performs case-insensitive partial matching on committee names with optional filters.
+
+    Examples:
+    - `/committees/search?q=Victory&state=MD`
+    - `/committees/search?q=PAC&committee_type=PAC&party=DEM`
+    - `/committees/search?q=Fund&is_active=true`
     """
-    committees, total_count = CommitteeService.search_committees(
+    committees, total_count = CommitteeService.search_committees_enhanced(
         db=db,
         search_query=q,
+        state=state.upper() if state else None,
+        committee_type=committee_type.upper() if committee_type else None,
+        party=party.upper() if party else None,
+        is_active=is_active,
         offset=pagination.offset,
         limit=pagination.page_size,
     )
@@ -116,12 +134,39 @@ def get_committee(
         request: Request,
         db: DBSession,
         committee_id: int,
+        include_candidate: Annotated[
+            bool, Query(description="Include associated candidate details")
+        ] = True,
 ) -> CommitteeDetail:
-    """Get detailed information for a specific committee."""
-    committee = CommitteeService.get_committee_by_id(db, committee_id)
-    if not committee:
+    """Get detailed information for a specific committee.
+
+    By default includes associated candidate details if the committee
+    is linked to a candidate.
+    """
+    result = CommitteeService.get_committee_by_id(db, committee_id, include_candidate)
+    if not result:
         raise HTTPException(status_code=404, detail="Committee not found")
-    return CommitteeDetail.model_validate(committee)
+
+    committee, candidate = result
+
+    # Build the response with candidate if available
+    committee_dict = {
+        "id": committee.id,
+        "name": committee.name,
+        "committee_type": committee.committee_type,
+        "party": committee.party,
+        "state": committee.state,
+        "city": committee.city,
+        "is_active": committee.is_active,
+        "candidate_id": committee.candidate_id,
+        "fec_committee_id": committee.fec_committee_id,
+        "state_committee_id": committee.state_committee_id,
+        "created_at": committee.created_at,
+        "updated_at": committee.updated_at,
+        "candidate": CandidateList.model_validate(candidate) if candidate else None,
+    }
+
+    return CommitteeDetail(**committee_dict)
 
 
 # noinspection PyUnusedLocal

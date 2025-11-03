@@ -58,3 +58,48 @@ class CandidateStats(BaseModel):
     avg_contribution: float = Field(description="Average contribution amount")
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class CandidateWithStats(CandidateBase):
+    """Candidate with optional embedded statistics."""
+
+    stats: CandidateStats | None = Field(
+        default=None, description="Aggregated fundraising statistics"
+    )
+
+
+class BulkStatsRequest(BaseModel):
+    """Request schema for bulk stats endpoint."""
+
+    candidate_ids: list[int] = Field(
+        description="List of candidate IDs to fetch stats for", min_length=1, max_length=100
+    )
+
+
+class BulkStatsResponse(BaseModel):
+    """Response schema for bulk stats endpoint."""
+
+    stats: dict[int, CandidateStats] = Field(
+        description="Dictionary mapping candidate_id to stats"
+    )
+
+
+class BatchDetailsRequest(BaseModel):
+    """Request schema for batch candidate details endpoint."""
+
+    ids: list[int] = Field(
+        description="List of candidate IDs to fetch details for",
+        min_length=1,
+        max_length=100,
+    )
+    include_stats: bool = Field(
+        default=False, description="Whether to include fundraising statistics"
+    )
+
+
+class BatchDetailsResponse(BaseModel):
+    """Response schema for batch candidate details endpoint."""
+
+    candidates: list[CandidateWithStats] = Field(
+        description="List of candidates with optional stats"
+    )

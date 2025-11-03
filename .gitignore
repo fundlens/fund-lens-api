@@ -27,3 +27,6 @@ uploads/ # If handling file uploads
 .env
 .env.local
 .env.production
+
+# AI
+.claude

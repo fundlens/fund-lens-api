@@ -2,9 +2,9 @@
 
 from typing import Any, cast
 
-from fund_lens_models.gold import GoldCommittee, GoldContribution
-from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from fund_lens_models.gold import GoldCandidate, GoldCommittee, GoldContribution
+from sqlalchemy import and_, func, select
+from sqlalchemy.orm import Session, joinedload
 from sqlalchemy.orm.attributes import InstrumentedAttribute
 
 from fund_lens_api.schemas.committee import CommitteeFilters, CommitteeStats
@@ -48,10 +48,38 @@ class CommitteeService:
         return list(committees), total_count
 
     @staticmethod
-    def get_committee_by_id(db: Session, committee_id: int) -> GoldCommittee | None:
-        """Get a single committee by ID."""
-        query = select(GoldCommittee).where(GoldCommittee.id == committee_id)
-        return db.execute(query).scalar_one_or_none()
+    def get_committee_by_id(
+        db: Session, committee_id: int, include_candidate: bool = False
+    ) -> tuple[GoldCommittee, GoldCandidate | None] | None:
+        """Get a single committee by ID.
+
+        Args:
+            db: Database session
+            committee_id: Committee ID to fetch
+            include_candidate: Whether to include associated candidate details
+
+        Returns:
+            Tuple of (committee, candidate) if include_candidate=True, otherwise (committee, None)
+            Returns None if committee not found
+        """
+        if include_candidate:
+            # Query with LEFT JOIN to get candidate if it exists
+            query = (
+                select(GoldCommittee, GoldCandidate)
+                .outerjoin(GoldCandidate, GoldCommittee.candidate_id == GoldCandidate.id)
+                .where(GoldCommittee.id == committee_id)
+            )
+            result = db.execute(query).one_or_none()
+            if not result:
+                return None
+            return result[0], result[1]
+        else:
+            # Simple query without candidate
+            query = select(GoldCommittee).where(GoldCommittee.id == committee_id)
+            committee = db.execute(query).scalar_one_or_none()
+            if not committee:
+                return None
+            return committee, None
 
     @staticmethod
     def search_committees(
@@ -84,11 +112,66 @@ class CommitteeService:
         return list(committees), total_count
 
     @staticmethod
+    def search_committees_enhanced(
+            db: Session,
+            search_query: str,
+            state: str | None = None,
+            committee_type: str | None = None,
+            party: str | None = None,
+            is_active: bool | None = None,
+            offset: int = 0,
+            limit: int = 50,
+    ) -> tuple[list[GoldCommittee], int]:
+        """Search committees by name with advanced filtering.
+
+        Args:
+            db: Database session
+            search_query: Name search query (partial match)
+            state: Filter by state
+            committee_type: Filter by committee type
+            party: Filter by party
+            is_active: Filter by active status
+            offset: Pagination offset
+            limit: Pagination limit
+
+        Returns:
+            Tuple of (committees list, total count)
+        """
+        # Build base search query using case-insensitive LIKE
+        search_pattern = f"%{search_query}%"
+        filters = [GoldCommittee.name.ilike(search_pattern)]
+
+        # Apply additional filters
+        if state:
+            filters.append(GoldCommittee.state == state)
+        if committee_type:
+            filters.append(GoldCommittee.committee_type == committee_type)
+        if party:
+            filters.append(GoldCommittee.party == party)
+        if is_active is not None:
+            filters.append(GoldCommittee.is_active == is_active)
+
+        # Build queries
+        query = select(GoldCommittee).where(and_(*filters))
+        count_query = select(func.count()).select_from(GoldCommittee).where(and_(*filters))
+
+        # Get total count
+        total_count = db.execute(count_query).scalar_one()
+
+        # Apply pagination and ordering
+        query = query.order_by(GoldCommittee.name).offset(offset).limit(limit)
+
+        # Execute query
+        committees = db.execute(query).scalars().all()
+
+        return list(committees), total_count
+
+    @staticmethod
     def get_committee_stats(db: Session, committee_id: int) -> CommitteeStats | None:
         """Get aggregated statistics for a committee."""
         # Verify committee exists
-        committee = CommitteeService.get_committee_by_id(db, committee_id)
-        if not committee:
+        result = CommitteeService.get_committee_by_id(db, committee_id)
+        if not result:
             return None
 
         # Query contribution statistics

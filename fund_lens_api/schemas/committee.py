@@ -4,6 +4,8 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from fund_lens_api.schemas.candidate import CandidateList
+
 
 class CommitteeBase(BaseModel):
     """Base committee fields shared across schemas."""
@@ -32,6 +34,9 @@ class CommitteeDetail(CommitteeList):
     state_committee_id: str | None = Field(description="State-level committee ID")
     created_at: datetime = Field(description="Record creation timestamp")
     updated_at: datetime = Field(description="Record update timestamp")
+    candidate: CandidateList | None = Field(
+        default=None, description="Associated candidate details (if applicable)"
+    )
 
 
 class CommitteeFilters(BaseModel):

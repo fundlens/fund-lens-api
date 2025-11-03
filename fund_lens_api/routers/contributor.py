@@ -1,5 +1,7 @@
 """API routes for contributor resources."""
 
+from datetime import date
+from decimal import Decimal
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -11,7 +13,10 @@ from fund_lens_api.schemas.contributor import (
     ContributorDetail,
     ContributorFilters,
     ContributorList,
+    ContributorSearchAggregated,
     ContributorStats,
+    ContributorsByCandidateResponse,
+    ContributorsByCommitteeResponse,
 )
 from fund_lens_api.services.contributor import ContributorService
 
@@ -61,20 +66,123 @@ def search_contributors(
         db: DBSession,
         q: Annotated[str, Query(min_length=1, max_length=500, description="Search query")],
         pagination: Annotated[PaginationParams, Depends()],
+        state: Annotated[str | None, Query(max_length=2, description="Filter by state")] = None,
+        entity_type: Annotated[
+            str | None, Query(description="Filter by entity type (IND, PAC, ORG, etc.)")
+        ] = None,
+        employer: Annotated[
+            str | None, Query(description="Filter by employer (partial match)")
+        ] = None,
+        occupation: Annotated[
+            str | None, Query(description="Filter by occupation (partial match)")
+        ] = None,
 ) -> PaginatedResponse[ContributorList]:
-    """Search contributors by name.
+    """Search contributors by name with advanced filtering.
 
-    Performs case-insensitive partial matching on contributor names.
+    Performs case-insensitive partial matching on contributor names with optional filters.
+
+    Examples:
+    - `/contributors/search?q=Smith&state=MD`
+    - `/contributors/search?q=John&entity_type=IND&employer=Google`
+    - `/contributors/search?q=PAC&entity_type=PAC`
     """
-    contributors, total_count = ContributorService.search_contributors(
+    contributors, total_count = ContributorService.search_contributors_enhanced(
         db=db,
         search_query=q,
+        state=state.upper() if state else None,
+        entity_type=entity_type.upper() if entity_type else None,
+        employer=employer,
+        occupation=occupation,
         offset=pagination.offset,
         limit=pagination.page_size,
     )
 
     return PaginatedResponse(
         items=[ContributorList.model_validate(c) for c in contributors],
+        meta=create_pagination_meta(
+            page=pagination.page,
+            page_size=pagination.page_size,
+            total_items=total_count,
+        ),
+    )
+
+
+# noinspection PyUnusedLocal
+@router.get("/search/aggregated", response_model=PaginatedResponse[ContributorSearchAggregated])
+@limiter.limit(RATE_LIMIT_SEARCH)
+def search_contributors_aggregated(
+    request: Request,
+    db: DBSession,
+    q: Annotated[str, Query(min_length=1, max_length=500, description="Search query")],
+    pagination: Annotated[PaginationParams, Depends()],
+    state: Annotated[str | None, Query(max_length=2, description="Filter by state")] = None,
+    entity_type: Annotated[
+        str | None, Query(description="Filter by entity type (INDIVIDUAL, COMMITTEE, ORG)")
+    ] = None,
+    min_amount: Annotated[
+        Decimal | None, Query(ge=0, description="Minimum total contribution amount")
+    ] = None,
+    max_amount: Annotated[
+        Decimal | None, Query(ge=0, description="Maximum total contribution amount")
+    ] = None,
+    date_from: Annotated[date | None, Query(description="Contributions from date")] = None,
+    date_to: Annotated[date | None, Query(description="Contributions to date")] = None,
+    sort_by: Annotated[
+        str,
+        Query(
+            description="Sort by: name, total_amount, contribution_count, unique_recipients, first_date, last_date"
+        ),
+    ] = "total_amount",
+    order: Annotated[str, Query(description="Sort order: asc, desc")] = "desc",
+) -> PaginatedResponse[ContributorSearchAggregated]:
+    """Search contributors by name with aggregated statistics across all recipients.
+
+    This endpoint returns contributors matching the search query with their aggregated
+    contribution statistics across all candidates and committees they've contributed to.
+
+    This provides a comprehensive view of each contributor's total activity.
+
+    Examples:
+    - `/contributors/search/aggregated?q=John&state=MD`
+    - `/contributors/search/aggregated?q=Smith&min_amount=1000&sort_by=total_amount`
+    - `/contributors/search/aggregated?q=PAC&entity_type=COMMITTEE&sort_by=contribution_count`
+    """
+    # Validate sort_by and order
+    valid_sort_by = {
+        "name",
+        "total_amount",
+        "contribution_count",
+        "unique_recipients",
+        "first_date",
+        "last_date",
+    }
+    if sort_by not in valid_sort_by:
+        raise HTTPException(
+            status_code=400,
+            detail=f"sort_by must be one of: {', '.join(valid_sort_by)}",
+        )
+
+    valid_order = {"asc", "desc"}
+    if order not in valid_order:
+        raise HTTPException(status_code=400, detail="order must be 'asc' or 'desc'")
+
+    contributors, total_count = ContributorService.search_contributors_with_aggregations(
+        db=db,
+        search_query=q,
+        state=state.upper() if state else None,
+        entity_type=entity_type.upper() if entity_type else None,
+        min_amount=min_amount,
+        max_amount=max_amount,
+        date_from=date_from,
+        date_to=date_to,
+        sort_by=sort_by,  # type: ignore
+        order=order,  # type: ignore
+        offset=pagination.offset,
+        limit=pagination.page_size,
+    )
+
+    return PaginatedResponse(
+        items=contributors,
         meta=create_pagination_meta(
             page=pagination.page,
             page_size=pagination.page_size,
@@ -144,3 +252,169 @@ def get_contributor_stats(
     if not stats:
         raise HTTPException(status_code=404, detail="Contributor not found")
     return stats
+
+
+# noinspection PyUnusedLocal
+@router.get("/by-candidate/{candidate_id}", response_model=ContributorsByCandidateResponse)
+@limiter.limit(RATE_LIMIT_DEFAULT)
+def get_contributors_by_candidate(
+    request: Request,
+    db: DBSession,
+    candidate_id: int,
+    page: Annotated[int, Query(ge=1, description="Page number")] = 1,
+    page_size: Annotated[int, Query(ge=1, le=100, description="Items per page")] = 25,
+    sort_by: Annotated[
+        str,
+        Query(
+            description="Sort by: total_amount, contribution_count, name, first_date, last_date"
+        ),
+    ] = "total_amount",
+    order: Annotated[str, Query(description="Sort order: asc, desc")] = "desc",
+    min_amount: Annotated[
+        Decimal | None, Query(ge=0, description="Minimum total contribution amount")
+    ] = None,
+    max_amount: Annotated[
+        Decimal | None, Query(ge=0, description="Maximum total contribution amount")
+    ] = None,
+    state: Annotated[str | None, Query(max_length=2, description="Filter by state")] = None,
+    entity_type: Annotated[
+        str | None, Query(description="Filter by entity type (IND, ORG, etc.)")
+    ] = None,
+    date_from: Annotated[date | None, Query(description="Contributions from date")] = None,
+    date_to: Annotated[date | None, Query(description="Contributions to date")] = None,
+    search: Annotated[str | None, Query(description="Search contributor names")] = None,
+    include_contributions: Annotated[
+        bool, Query(description="Include individual contribution details")
+    ] = False,
+) -> ContributorsByCandidateResponse:
+    """Get all contributors to a specific candidate with aggregated statistics.
+
+    This endpoint returns contributors grouped by their total contributions to the candidate,
+    with optional filtering, sorting, and pagination. Can optionally include individual
+    contribution details for each contributor.
+
+    Examples:
+    - Get top 25 contributors: `/contributors/by-candidate/183?page=1&page_size=25`
+    - Filter by state: `/contributors/by-candidate/183?state=MD`
+    - Include contributions: `/contributors/by-candidate/183?include_contributions=true`
+    - Date range: `/contributors/by-candidate/183?date_from=2024-01-01&date_to=2024-12-31`
+    """
+    # Validate sort_by and order
+    valid_sort_by = {"total_amount", "contribution_count", "name", "first_date", "last_date"}
+    if sort_by not in valid_sort_by:
+        raise HTTPException(
+            status_code=400,
+            detail=f"sort_by must be one of: {', '.join(valid_sort_by)}",
+        )
+
+    valid_order = {"asc", "desc"}
+    if order not in valid_order:
+        raise HTTPException(status_code=400, detail="order must be 'asc' or 'desc'")
+
+    # Calculate offset
+    offset = (page - 1) * page_size
+
+    result = ContributorService.get_contributors_by_candidate(
+        db=db,
+        candidate_id=candidate_id,
+        include_contributions=include_contributions,
+        sort_by=sort_by,  # type: ignore
+        order=order,  # type: ignore
+        min_amount=min_amount,
+        max_amount=max_amount,
+        state=state.upper() if state else None,
+        entity_type=entity_type.upper() if entity_type else None,
+        date_from=date_from,
+        date_to=date_to,
+        search=search,
+        offset=offset,
+        limit=page_size,
+    )
+
+    if not result:
+        raise HTTPException(status_code=404, detail="Candidate not found")
+
+    return result
+
+
+# noinspection PyUnusedLocal
+@router.get("/by-committee/{committee_id}", response_model=ContributorsByCommitteeResponse)
+@limiter.limit(RATE_LIMIT_DEFAULT)
+def get_contributors_by_committee(
+    request: Request,
+    db: DBSession,
+    committee_id: int,
+    page: Annotated[int, Query(ge=1, description="Page number")] = 1,
+    page_size: Annotated[int, Query(ge=1, le=100, description="Items per page")] = 25,
+    sort_by: Annotated[
+        str,
+        Query(
+            description="Sort by: total_amount, contribution_count, name, first_date, last_date"
+        ),
+    ] = "total_amount",
+    order: Annotated[str, Query(description="Sort order: asc, desc")] = "desc",
+    min_amount: Annotated[
+        Decimal | None, Query(ge=0, description="Minimum total contribution amount")
+    ] = None,
+    max_amount: Annotated[
+        Decimal | None, Query(ge=0, description="Maximum total contribution amount")
+    ] = None,
+    state: Annotated[str | None, Query(max_length=2, description="Filter by state")] = None,
+    entity_type: Annotated[
+        str | None, Query(description="Filter by entity type (IND, ORG, etc.)")
+    ] = None,
+    date_from: Annotated[date | None, Query(description="Contributions from date")] = None,
+    date_to: Annotated[date | None, Query(description="Contributions to date")] = None,
+    search: Annotated[str | None, Query(description="Search contributor names")] = None,
+    include_contributions: Annotated[
+        bool, Query(description="Include individual contribution details")
+    ] = False,
+) -> ContributorsByCommitteeResponse:
+    """Get all contributors to a specific committee with aggregated statistics.
+
+    This endpoint returns contributors grouped by their total contributions to the committee,
+    with optional filtering, sorting, and pagination. Can optionally include individual
+    contribution details for each contributor.
+
+    Examples:
+    - Get top 25 contributors: `/contributors/by-committee/456?page=1&page_size=25`
+    - Filter by state: `/contributors/by-committee/456?state=MD`
+    - Include contributions: `/contributors/by-committee/456?include_contributions=true`
+    - Date range: `/contributors/by-committee/456?date_from=2024-01-01&date_to=2024-12-31`
+    """
+    # Validate sort_by and order
+    valid_sort_by = {"total_amount", "contribution_count", "name", "first_date", "last_date"}
+    if sort_by not in valid_sort_by:
+        raise HTTPException(
+            status_code=400,
+            detail=f"sort_by must be one of: {', '.join(valid_sort_by)}",
+        )
+
+    valid_order = {"asc", "desc"}
+    if order not in valid_order:
+        raise HTTPException(status_code=400, detail="order must be 'asc' or 'desc'")
+
+    # Calculate offset
+    offset = (page - 1) * page_size
+
+    result = ContributorService.get_contributors_by_committee(
+        db=db,
+        committee_id=committee_id,
+        include_contributions=include_contributions,
+        sort_by=sort_by,  # type: ignore
+        order=order,  # type: ignore
+        min_amount=min_amount,
+        max_amount=max_amount,
+        state=state.upper() if state else None,
+        entity_type=entity_type.upper() if entity_type else None,
+        date_from=date_from,
+        date_to=date_to,
+        search=search,
+        offset=offset,
+        limit=page_size,
+    )
+
+    if not result:
+        raise HTTPException(status_code=404, detail="Committee not found")
+
+    return result
