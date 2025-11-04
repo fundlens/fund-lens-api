@@ -225,8 +225,9 @@ def get_top_contributors(
             "contributor": ContributorList.model_validate(contributor),
             "total_amount": total_amount,
             "contribution_count": contribution_count,
+            "unique_recipients": unique_recipients,
         }
-        for contributor, total_amount, contribution_count in top_contributors
+        for contributor, total_amount, contribution_count, unique_recipients in top_contributors
     ]
 
 

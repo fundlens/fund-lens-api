@@ -204,7 +204,7 @@ class ContributorService:
             limit: int = 10,
             state: str | None = None,
             entity_type: str | None = None,
-    ) -> list[tuple[GoldContributor, float, int]]:
+    ) -> list[tuple[GoldContributor, float, int, int]]:
         """Get top contributors by total amount.
 
         Args:
@@ -214,7 +214,7 @@ class ContributorService:
             entity_type: Optional entity type filter
 
         Returns:
-            List of (contributor, total_amount, contribution_count) tuples
+            List of (contributor, total_amount, contribution_count, unique_recipients) tuples
         """
         # Build query to get contributors with their total contribution amounts and counts
         query = (
@@ -222,6 +222,7 @@ class ContributorService:
                 GoldContributor,
                 func.sum(GoldContribution.amount).label("total_amount"),
                 func.count(GoldContribution.id).label("contribution_count"),
+                func.count(func.distinct(GoldContribution.recipient_committee_id)).label("unique_recipients"),
             )
             .join(GoldContribution, GoldContribution.contributor_id == GoldContributor.id)
             .group_by(GoldContributor.id)
@@ -236,7 +237,7 @@ class ContributorService:
             query = query.where(GoldContributor.entity_type == entity_type)
 
         results = db.execute(query).all()
-        return [(row[0], float(row[1]), row[2]) for row in results]
+        return [(row[0], float(row[1]), row[2], row[3]) for row in results]
 
     @staticmethod
     def get_contributors_by_candidate(
