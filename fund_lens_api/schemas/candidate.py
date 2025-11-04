@@ -42,10 +42,14 @@ class CandidateFilters(BaseModel):
     party: str | None = Field(default=None, description="Filter by party")
     is_active: bool | None = Field(default=None, description="Filter by active status")
     district: str | None = Field(default=None, description="Filter by district")
+    level: str | None = Field(default=None, description="Filter by level (federal or state)")
 
     def to_filter_dict(self) -> dict[str, str | bool]:
-        """Convert to dict of non-None filters for SQLAlchemy queries."""
-        return {k: v for k, v in self.model_dump().items() if v is not None}
+        """Convert to dict of non-None filters for SQLAlchemy queries.
+
+        Note: 'level' is excluded as it requires special handling (IN clause).
+        """
+        return {k: v for k, v in self.model_dump().items() if v is not None and k != 'level'}
 
 
 class CandidateStats(BaseModel):

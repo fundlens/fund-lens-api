@@ -37,12 +37,24 @@ class CandidateService:
         query = select(GoldCandidate)
         count_query = select(func.count()).select_from(GoldCandidate)
 
-        # Apply filters
+        # Apply standard filters (excludes 'level' which needs special handling)
         filter_dict = filters.to_filter_dict()
         for field, value in filter_dict.items():
             column = cast(InstrumentedAttribute[Any], getattr(GoldCandidate, field))
             query = query.where(column == value)
             count_query = count_query.where(column == value)
+
+        # Handle level filter (federal vs state)
+        if filters.level:
+            level = filters.level.lower()
+            if level == 'federal':
+                # Federal offices: House (H), Senate (S), President (P)
+                query = query.where(GoldCandidate.office.in_(['H', 'S', 'P']))
+                count_query = count_query.where(GoldCandidate.office.in_(['H', 'S', 'P']))
+            elif level == 'state':
+                # State offices: everything else
+                query = query.where(GoldCandidate.office.not_in(['H', 'S', 'P']))
+                count_query = count_query.where(GoldCandidate.office.not_in(['H', 'S', 'P']))
 
         # Get total count
         total_count = db.execute(count_query).scalar_one()
