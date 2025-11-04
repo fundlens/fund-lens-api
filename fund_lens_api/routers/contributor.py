@@ -204,7 +204,7 @@ def get_top_contributors(
     """Get top contributors by total contribution amount.
 
     Optionally filter by state and/or entity type.
-    Returns contributors with their total contribution amounts.
+    Returns contributors with their total contribution amounts and counts.
 
     Examples:
     - `/contributors/top?limit=25`
@@ -223,8 +223,9 @@ def get_top_contributors(
         {
             "contributor": ContributorList.model_validate(contributor),
             "total_amount": total_amount,
+            "contribution_count": contribution_count,
         }
-        for contributor, total_amount in top_contributors
+        for contributor, total_amount, contribution_count in top_contributors
     ]
 
 

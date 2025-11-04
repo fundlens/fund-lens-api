@@ -1,6 +1,6 @@
 [project]
 name = "fund-lens-api"
-version = "0.1.6"
+version = "0.1.7"
 description = "FastAPI layer for FundLens campaign finance data"
 authors = [
     {name = "Tom Boone", email = "tbc@tomboone.com"}
