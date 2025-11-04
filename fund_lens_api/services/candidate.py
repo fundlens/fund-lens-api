@@ -19,11 +19,19 @@ class CandidateService:
             filters: CandidateFilters,
             offset: int = 0,
             limit: int = 50,
-    ) -> tuple[list[GoldCandidate], int]:
+            include_stats: bool = False,
+    ) -> tuple[list[CandidateWithStats], int]:
         """List candidates with filtering and pagination.
 
+        Args:
+            db: Database session
+            filters: Candidate filters
+            offset: Pagination offset
+            limit: Pagination limit
+            include_stats: Whether to include fundraising statistics
+
         Returns:
-            Tuple of (candidates list, total count)
+            Tuple of (candidates list with optional stats, total count)
         """
         # Build base query
         query = select(GoldCandidate)
@@ -43,9 +51,43 @@ class CandidateService:
         query = query.order_by(GoldCandidate.name).offset(offset).limit(limit)
 
         # Execute query
-        candidates = db.execute(query).scalars().all()
+        candidates = list(db.execute(query).scalars().all())
 
-        return list(candidates), total_count
+        # Build CandidateWithStats objects
+        if include_stats:
+            # Fetch stats for all candidates in bulk
+            candidate_ids = [c.id for c in candidates]
+            stats_map = CandidateService.get_bulk_candidate_stats(db, candidate_ids)
+
+            candidates_with_stats = [
+                CandidateWithStats(
+                    id=c.id,
+                    name=c.name,
+                    office=c.office,
+                    state=c.state,
+                    district=c.district,
+                    party=c.party,
+                    is_active=c.is_active,
+                    stats=stats_map.get(c.id),
+                )
+                for c in candidates
+            ]
+        else:
+            candidates_with_stats = [
+                CandidateWithStats(
+                    id=c.id,
+                    name=c.name,
+                    office=c.office,
+                    state=c.state,
+                    district=c.district,
+                    party=c.party,
+                    is_active=c.is_active,
+                    stats=None,
+                )
+                for c in candidates
+            ]
+
+        return candidates_with_stats, total_count
 
     @staticmethod
     def get_candidate_by_id(db: Session, candidate_id: int) -> GoldCandidate | None:

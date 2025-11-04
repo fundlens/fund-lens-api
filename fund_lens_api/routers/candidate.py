@@ -25,20 +25,21 @@ router = APIRouter(prefix="/candidates", tags=["candidates"])
 
 
 # noinspection PyUnusedLocal
-@router.get("", response_model=PaginatedResponse[CandidateList] | PaginatedResponse[dict])
+@router.get("", response_model=PaginatedResponse[CandidateWithStats] | PaginatedResponse[dict])
 @limiter.limit(RATE_LIMIT_DEFAULT)
 def list_candidates(
         request: Request,
         db: DBSession,
         pagination: Annotated[PaginationParams, Depends()],
         filters: Annotated[CandidateFilters, Depends()],
+        include_stats: Annotated[bool, Query(description="Include fundraising statistics")] = False,
         fields: Annotated[
             str | None,
             Query(
                 description="Comma-separated list of fields to return (e.g., 'id,name,party')"
             ),
         ] = None,
-) -> PaginatedResponse[CandidateList] | PaginatedResponse[dict]:
+) -> PaginatedResponse[CandidateWithStats] | PaginatedResponse[dict]:
     """List candidates with pagination and filtering.
 
     Supports filtering by:
@@ -51,22 +52,22 @@ def list_candidates(
     Field selection:
     - Use the 'fields' parameter to select specific fields (e.g., ?fields=id,name,party)
     - Omit the 'fields' parameter to get all fields
+    - Include fundraising statistics with include_stats=true
     """
     candidates, total_count = CandidateService.list_candidates(
         db=db,
         filters=filters,
         offset=pagination.offset,
         limit=pagination.page_size,
+        include_stats=include_stats,
     )
 
     # Apply field selection if requested
     field_set = parse_fields_param(fields)
     if field_set:
-        items = apply_field_selection(
-            [CandidateList.model_validate(c) for c in candidates], field_set
-        )
+        items = apply_field_selection(candidates, field_set)
     else:
-        items = [CandidateList.model_validate(c) for c in candidates]
+        items = candidates
 
     return PaginatedResponse(
         items=items,
