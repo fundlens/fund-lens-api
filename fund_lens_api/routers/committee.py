@@ -29,6 +29,10 @@ def list_committees(
         pagination: Annotated[PaginationParams, Depends()],
         filters: Annotated[CommitteeFilters, Depends()],
         include_stats: Annotated[bool, Query(description="Include fundraising statistics")] = False,
+        sort_by: Annotated[
+            str, Query(description="Sort by: name, total_received, total_contributions")
+        ] = "name",
+        order: Annotated[str, Query(description="Sort order: asc, desc")] = "asc",
 ) -> PaginatedResponse[CommitteeWithStats] | PaginatedResponse[CommitteeList]:
     """List committees with pagination and filtering.
 
@@ -39,6 +43,8 @@ def list_committees(
     - is_active: Active status
     - candidate_id: Associated candidate ID
     - include_stats: Include aggregated fundraising statistics (default: false)
+    - sort_by: Sort by name, total_received, or total_contributions (default: name)
+    - order: Sort order asc or desc (default: asc)
     """
     committees, total_count = CommitteeService.list_committees(
         db=db,
@@ -46,6 +52,8 @@ def list_committees(
         offset=pagination.offset,
         limit=pagination.page_size,
         include_stats=include_stats,
+        sort_by=sort_by,
+        order=order,
     )
 
     if include_stats:

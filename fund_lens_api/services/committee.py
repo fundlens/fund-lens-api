@@ -3,7 +3,7 @@
 from typing import Any, cast
 
 from fund_lens_models.gold import GoldCandidate, GoldCommittee, GoldContribution
-from sqlalchemy import and_, func, select
+from sqlalchemy import and_, desc, func, nullslast, select
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy.orm.attributes import InstrumentedAttribute
 
@@ -20,6 +20,8 @@ class CommitteeService:
             offset: int = 0,
             limit: int = 50,
             include_stats: bool = False,
+            sort_by: str = "name",
+            order: str = "asc",
     ) -> tuple[list[GoldCommittee] | list[tuple[GoldCommittee, dict]], int]:
         """List committees with filtering and pagination.
 
@@ -29,6 +31,8 @@ class CommitteeService:
             offset: Pagination offset
             limit: Pagination limit
             include_stats: Include aggregated statistics for each committee
+            sort_by: Sort by field (name, total_received, total_contributions)
+            order: Sort order (asc, desc)
 
         Returns:
             Tuple of (committees list, total count)
@@ -77,8 +81,40 @@ class CommitteeService:
                 count_query = count_query.where(column == value)
             total_count = db.execute(count_query).scalar_one()
 
-            # Apply pagination and ordering
-            query = query.order_by(GoldCommittee.name).offset(offset).limit(limit)
+            # Apply sorting
+            if sort_by == "total_received":
+                # Sort by total amount received
+                if order == "desc":
+                    query = query.order_by(
+                        nullslast(desc(stats_subquery.c.total_amount_received)),
+                        GoldCommittee.name.asc(),
+                    )
+                else:
+                    query = query.order_by(
+                        nullslast(stats_subquery.c.total_amount_received),
+                        GoldCommittee.name.asc(),
+                    )
+            elif sort_by == "total_contributions":
+                # Sort by total number of contributions
+                if order == "desc":
+                    query = query.order_by(
+                        nullslast(desc(stats_subquery.c.total_contributions_received)),
+                        GoldCommittee.name.asc(),
+                    )
+                else:
+                    query = query.order_by(
+                        nullslast(stats_subquery.c.total_contributions_received),
+                        GoldCommittee.name.asc(),
+                    )
+            else:
+                # Sort by name (default)
+                if order == "desc":
+                    query = query.order_by(GoldCommittee.name.desc())
+                else:
+                    query = query.order_by(GoldCommittee.name.asc())
+
+            # Apply pagination
+            query = query.offset(offset).limit(limit)
 
             # Execute query
             results = db.execute(query).all()
@@ -113,8 +149,14 @@ class CommitteeService:
             # Get total count
             total_count = db.execute(count_query).scalar_one()
 
-            # Apply pagination and ordering
-            query = query.order_by(GoldCommittee.name).offset(offset).limit(limit)
+            # Apply sorting (only name sorting is supported without stats)
+            if order == "desc":
+                query = query.order_by(GoldCommittee.name.desc())
+            else:
+                query = query.order_by(GoldCommittee.name.asc())
+
+            # Apply pagination
+            query = query.offset(offset).limit(limit)
 
             # Execute query
             committees = db.execute(query).scalars().all()

@@ -202,8 +202,15 @@ class ContributorService:
             db: Session,
             limit: int = 10,
             state: str | None = None,
+            entity_type: str | None = None,
     ) -> list[tuple[GoldContributor, float]]:
         """Get top contributors by total amount.
+
+        Args:
+            db: Database session
+            limit: Maximum number of contributors to return
+            state: Optional state filter
+            entity_type: Optional entity type filter
 
         Returns:
             List of (contributor, total_amount) tuples
@@ -220,9 +227,11 @@ class ContributorService:
             .limit(limit)
         )
 
-        # Apply state filter if provided
+        # Apply filters if provided
         if state:
             query = query.where(GoldContributor.state == state)
+        if entity_type:
+            query = query.where(GoldContributor.entity_type == entity_type)
 
         results = db.execute(query).all()
         return [(row[0], float(row[1])) for row in results]

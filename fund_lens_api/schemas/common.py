@@ -12,8 +12,17 @@ T = TypeVar("T")
 class PaginationParams(BaseModel):
     """Query parameters for pagination."""
 
-    page: int = Field(default=1, ge=1, description="Page number (1-indexed)")
-    page_size: int = Field(default=50, ge=1, le=1000, description="Items per page")
+    page: int = Field(
+        default=1,
+        ge=1,
+        description="Page number (1-indexed)",
+    )
+    page_size: int = Field(
+        default=50,
+        ge=1,
+        le=100,
+        description="Items per page (maximum: 100)",
+    )
 
     @property
     def offset(self) -> int:
