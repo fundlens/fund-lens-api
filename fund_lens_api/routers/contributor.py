@@ -10,6 +10,7 @@ from fund_lens_api.dependencies import DBSession
 from fund_lens_api.rate_limit import RATE_LIMIT_DEFAULT, RATE_LIMIT_SEARCH, RATE_LIMIT_STATS, limiter
 from fund_lens_api.schemas.common import PaginatedResponse, PaginationParams, create_pagination_meta
 from fund_lens_api.schemas.contributor import (
+    ContributorContributionsResponse,
     ContributorDetail,
     ContributorFilters,
     ContributorList,
@@ -265,6 +266,38 @@ def get_contributor_stats(
     if not stats:
         raise HTTPException(status_code=404, detail="Contributor not found")
     return stats
+
+
+# noinspection PyUnusedLocal
+@router.get("/{contributor_id}/contributions", response_model=ContributorContributionsResponse)
+@limiter.limit(RATE_LIMIT_DEFAULT)
+def get_contributor_contributions(
+        request: Request,
+        db: DBSession,
+        contributor_id: int,
+        page_size: Annotated[int, Query(ge=1, le=100, description="Number of contributions to return")] = 100,
+) -> ContributorContributionsResponse:
+    """Get all contributions made by a specific contributor.
+
+    Returns individual contributions sorted by amount (largest first),
+    including committee information for each contribution.
+
+    Examples:
+    - `/contributors/123/contributions` - Get first 100 contributions
+    - `/contributors/123/contributions?page_size=50` - Get first 50 contributions
+    """
+    # Verify contributor exists
+    contributor = ContributorService.get_contributor_by_id(db, contributor_id)
+    if not contributor:
+        raise HTTPException(status_code=404, detail="Contributor not found")
+
+    contributions = ContributorService.get_contributor_contributions(
+        db,
+        contributor_id,
+        limit=page_size,
+    )
+
+    return ContributorContributionsResponse(contributions=contributions)
 
 
 # noinspection PyUnusedLocal

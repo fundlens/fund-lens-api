@@ -177,3 +177,23 @@ class ContributorSearchAggregated(BaseModel):
     unique_committees: int = Field(description="Number of unique committees")
     first_contribution_date: date | None = Field(description="First contribution date")
     last_contribution_date: date | None = Field(description="Last contribution date")
+
+
+class ContributionWithCommittee(BaseModel):
+    """Contribution record with committee information."""
+
+    id: int = Field(description="Contribution ID")
+    contributor_id: int = Field(description="Contributor ID")
+    recipient_committee_id: int = Field(description="Recipient committee ID", alias="committee_id")
+    committee_name: str = Field(description="Committee name")
+    amount: Decimal = Field(description="Contribution amount")
+    contribution_date: date = Field(description="Contribution date", alias="date")
+    contribution_type: str = Field(description="Contribution type")
+
+    model_config = ConfigDict(from_attributes=True, populate_by_name=True)
+
+
+class ContributorContributionsResponse(BaseModel):
+    """Response for contributor contributions list."""
+
+    contributions: list[ContributionWithCommittee] = Field(description="List of contributions")

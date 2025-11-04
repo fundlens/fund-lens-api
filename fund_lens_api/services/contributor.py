@@ -13,6 +13,7 @@ from fund_lens_api.schemas.contributor import (
     CandidateSummary,
     CommitteeSummary,
     ContributionSimple,
+    ContributionWithCommittee,
     ContributorFilters,
     ContributorSearchAggregated,
     ContributorStats,
@@ -806,3 +807,54 @@ class ContributorService:
         ]
 
         return contributors, total_count
+
+    @staticmethod
+    def get_contributor_contributions(
+        db: Session,
+        contributor_id: int,
+        limit: int = 100,
+    ) -> list[ContributionWithCommittee]:
+        """Get all contributions made by a specific contributor.
+
+        Args:
+            db: Database session
+            contributor_id: Contributor ID
+            limit: Maximum number of contributions to return
+
+        Returns:
+            List of contributions with committee information
+        """
+        # Query contributions with committee information
+        query = (
+            select(
+                GoldContribution.id,
+                GoldContribution.contributor_id,
+                GoldContribution.recipient_committee_id,
+                GoldCommittee.name.label("committee_name"),
+                GoldContribution.amount,
+                GoldContribution.contribution_date,
+                GoldContribution.contribution_type,
+            )
+            .join(
+                GoldCommittee,
+                GoldContribution.recipient_committee_id == GoldCommittee.id,
+            )
+            .where(GoldContribution.contributor_id == contributor_id)
+            .order_by(GoldContribution.amount.desc())
+            .limit(limit)
+        )
+
+        results = db.execute(query).all()
+
+        return [
+            ContributionWithCommittee(
+                id=row.id,
+                contributor_id=row.contributor_id,
+                recipient_committee_id=row.recipient_committee_id,
+                committee_name=row.committee_name,
+                amount=row.amount,
+                contribution_date=row.contribution_date,
+                contribution_type=row.contribution_type,
+            )
+            for row in results
+        ]
