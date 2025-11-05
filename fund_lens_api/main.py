@@ -12,7 +12,7 @@ from slowapi.errors import RateLimitExceeded
 from fund_lens_api.config import get_settings
 from fund_lens_api.dependencies import close_db, init_db
 from fund_lens_api.rate_limit import limiter
-from fund_lens_api.routers import candidate, committee, contribution, contributor, metadata, race, state
+from fund_lens_api.routers import candidate, committee, contribution, contributor, metadata, race, search, state
 
 
 @asynccontextmanager
@@ -59,6 +59,7 @@ app.include_router(committee.router)
 app.include_router(contribution.router)
 app.include_router(metadata.router)
 app.include_router(race.router)
+app.include_router(search.router)
 app.include_router(state.router)
 
 

@@ -211,3 +211,26 @@ class TopContributor(BaseModel):
     unique_recipients: int = Field(description="Number of unique recipients")
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class ContributorRecipient(BaseModel):
+    """Aggregated recipient data for a contributor."""
+
+    committee_id: int = Field(description="Committee ID")
+    committee_name: str = Field(description="Committee name")
+    committee_type: str | None = Field(description="Committee type")
+    committee_state: str | None = Field(description="Committee state")
+    committee_party: str | None = Field(description="Committee party")
+    contribution_count: int = Field(description="Number of contributions to this recipient")
+    total_amount: Decimal = Field(description="Total amount contributed to this recipient")
+    first_contribution_date: date | None = Field(description="Date of first contribution")
+    last_contribution_date: date | None = Field(description="Date of last contribution")
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ContributorRecipientsResponse(BaseModel):
+    """Response for contributor recipients endpoint."""
+
+    recipients: list[ContributorRecipient] = Field(description="List of recipients")
+    meta: dict = Field(description="Metadata including total count")

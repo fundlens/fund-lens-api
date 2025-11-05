@@ -14,6 +14,7 @@ from fund_lens_api.schemas.contributor import (
     ContributorDetail,
     ContributorFilters,
     ContributorList,
+    ContributorRecipientsResponse,
     ContributorSearchAggregated,
     ContributorStats,
     ContributorsByCandidateResponse,
@@ -255,21 +256,6 @@ def get_top_contributors(
 
 
 # noinspection PyUnusedLocal
-@router.get("/{contributor_id}", response_model=ContributorDetail)
-@limiter.limit(RATE_LIMIT_DEFAULT)
-def get_contributor(
-        request: Request,
-        db: DBSession,
-        contributor_id: int,
-) -> ContributorDetail:
-    """Get detailed information for a specific contributor."""
-    contributor = ContributorService.get_contributor_by_id(db, contributor_id)
-    if not contributor:
-        raise HTTPException(status_code=404, detail="Contributor not found")
-    return ContributorDetail.model_validate(contributor)
-
-
-# noinspection PyUnusedLocal
 @router.get("/{contributor_id}/stats", response_model=ContributorStats)
 @limiter.limit(RATE_LIMIT_STATS)
 def get_contributor_stats(
@@ -302,10 +288,12 @@ def get_contributor_contributions(
         page_size: Annotated[int, Query(ge=1, le=100, description="Number of contributions to return")] = 100,
         sort_by: Annotated[str, Query(pattern="^(recipient|date|amount)$", description="Sort column: recipient, date, or amount")] = "amount",
         sort_direction: Annotated[str, Query(pattern="^(asc|desc)$", description="Sort direction: asc or desc")] = "desc",
+        start_date: Annotated[date | None, Query(description="Filter contributions from this date (inclusive, format: YYYY-MM-DD)")] = None,
+        end_date: Annotated[date | None, Query(description="Filter contributions until this date (inclusive, format: YYYY-MM-DD)")] = None,
 ) -> ContributorContributionsResponse:
     """Get all contributions made by a specific contributor.
 
-    Returns individual contributions with sorting and pagination,
+    Returns individual contributions with sorting, pagination, and optional date range filtering,
     including committee information for each contribution.
 
     Examples:
@@ -313,6 +301,7 @@ def get_contributor_contributions(
     - `/contributors/123/contributions?page_size=50` - Get first 50 contributions
     - `/contributors/123/contributions?sort_by=recipient&sort_direction=asc` - Sort by committee name A-Z
     - `/contributors/123/contributions?sort_by=date&sort_direction=desc` - Sort by most recent date
+    - `/contributors/123/contributions?start_date=2024-01-01&end_date=2024-12-31` - Filter by date range
     """
     # Verify contributor exists
     contributor = ContributorService.get_contributor_by_id(db, contributor_id)
@@ -325,9 +314,75 @@ def get_contributor_contributions(
         limit=page_size,
         sort_by=sort_by,
         sort_direction=sort_direction,
+        start_date=start_date,
+        end_date=end_date,
     )
 
     return ContributorContributionsResponse(contributions=contributions)
+
+
+# noinspection PyUnusedLocal
+@router.get("/{contributor_id}/recipients", response_model=ContributorRecipientsResponse)
+@limiter.limit(RATE_LIMIT_DEFAULT)
+def get_contributor_recipients(
+    request: Request,
+    db: DBSession,
+    contributor_id: int,
+    sort_by: Annotated[
+        str,
+        Query(
+            pattern="^(committee_name|total_amount|contribution_count|first_date|last_date)$",
+            description="Sort by: committee_name, total_amount, contribution_count, first_date, last_date",
+        ),
+    ] = "total_amount",
+    sort_direction: Annotated[
+        str,
+        Query(pattern="^(asc|desc)$", description="Sort direction: asc or desc"),
+    ] = "desc",
+) -> ContributorRecipientsResponse:
+    """Get pre-aggregated recipient data for a contributor.
+
+    This endpoint provides recipient committees grouped and aggregated for a specific contributor.
+    Instead of fetching thousands of individual contributions and grouping them client-side,
+    this endpoint returns pre-aggregated recipient data with contribution counts and totals.
+
+    This significantly improves performance for contributor detail pages by reducing:
+    - Number of API requests (from many to one)
+    - Payload size (from 1000s of records to 5-10 aggregated records)
+    - Client-side processing (no grouping needed)
+    """
+    # Verify contributor exists
+    contributor = ContributorService.get_contributor_by_id(db, contributor_id)
+    if not contributor:
+        raise HTTPException(status_code=404, detail="Contributor not found")
+
+    # Get aggregated recipients
+    recipients, total_count = ContributorService.get_contributor_recipients(
+        db,
+        contributor_id,
+        sort_by=sort_by,
+        sort_direction=sort_direction,
+    )
+
+    return ContributorRecipientsResponse(
+        recipients=recipients,
+        meta={"total_count": total_count},
+    )
+
+
+# noinspection PyUnusedLocal
+@router.get("/{contributor_id}", response_model=ContributorDetail)
+@limiter.limit(RATE_LIMIT_DEFAULT)
+def get_contributor(
+        request: Request,
+        db: DBSession,
+        contributor_id: int,
+) -> ContributorDetail:
+    """Get detailed information for a specific contributor."""
+    contributor = ContributorService.get_contributor_by_id(db, contributor_id)
+    if not contributor:
+        raise HTTPException(status_code=404, detail="Contributor not found")
+    return ContributorDetail.model_validate(contributor)
 
 
 # noinspection PyUnusedLocal
@@ -338,7 +393,7 @@ def get_contributors_by_candidate(
     db: DBSession,
     candidate_id: int,
     page: Annotated[int, Query(ge=1, description="Page number")] = 1,
-    page_size: Annotated[int, Query(ge=1, le=100, description="Items per page")] = 25,
+    page_size: Annotated[int, Query(ge=1, le=1000, description="Items per page (max 1000)")] = 25,
     sort_by: Annotated[
         str,
         Query(
@@ -421,7 +476,7 @@ def get_contributors_by_committee(
     db: DBSession,
     committee_id: int,
     page: Annotated[int, Query(ge=1, description="Page number")] = 1,
-    page_size: Annotated[int, Query(ge=1, le=100, description="Items per page")] = 25,
+    page_size: Annotated[int, Query(ge=1, le=1000, description="Items per page (max 1000)")] = 25,
     sort_by: Annotated[
         str,
         Query(

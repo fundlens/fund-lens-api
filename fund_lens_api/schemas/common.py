@@ -94,3 +94,19 @@ def create_pagination_meta(
         has_next=page < total_pages,
         has_prev=page > 1,
     )
+
+
+class UnifiedSearchResponse(BaseModel):
+    """Response for unified search endpoint combining multiple resource types."""
+
+    candidates: PaginatedResponse | None = Field(
+        default=None, description="Candidate search results"
+    )
+    contributors: PaginatedResponse | None = Field(
+        default=None, description="Contributor search results"
+    )
+    committees: PaginatedResponse | None = Field(
+        default=None, description="Committee search results"
+    )
+
+    model_config = ConfigDict(from_attributes=True)

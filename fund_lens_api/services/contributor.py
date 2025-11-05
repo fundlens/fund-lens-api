@@ -848,6 +848,8 @@ class ContributorService:
         limit: int = 100,
         sort_by: str = "amount",
         sort_direction: str = "desc",
+        start_date: date | None = None,
+        end_date: date | None = None,
     ) -> list[ContributionWithCommittee]:
         """Get all contributions made by a specific contributor.
 
@@ -857,6 +859,8 @@ class ContributorService:
             limit: Maximum number of contributions to return
             sort_by: Column to sort by (recipient, date, or amount)
             sort_direction: Sort direction (asc or desc)
+            start_date: Optional start date filter (inclusive)
+            end_date: Optional end date filter (inclusive)
 
         Returns:
             List of contributions with committee information
@@ -881,6 +885,12 @@ class ContributorService:
             )
             .where(GoldContribution.contributor_id == contributor_id)
         )
+
+        # Apply date range filters if provided
+        if start_date:
+            query = query.where(GoldContribution.contribution_date >= start_date)
+        if end_date:
+            query = query.where(GoldContribution.contribution_date <= end_date)
 
         # Map sort_by values to actual column references
         sort_column_map = {
@@ -918,3 +928,91 @@ class ContributorService:
             )
             for row in results
         ]
+
+    @staticmethod
+    def get_contributor_recipients(
+        db: Session,
+        contributor_id: int,
+        sort_by: str = "total_amount",
+        sort_direction: str = "desc",
+    ) -> tuple[list[Any], int]:
+        """Get pre-aggregated recipient data for a contributor.
+
+        Args:
+            db: Database session
+            contributor_id: Contributor ID
+            sort_by: Field to sort by (total_amount, contribution_count, committee_name, first_date, last_date)
+            sort_direction: Sort direction (asc, desc)
+
+        Returns:
+            Tuple of (recipients list, total count)
+        """
+        from fund_lens_api.schemas.contributor import ContributorRecipient
+
+        # Build aggregation query
+        query = (
+            select(
+                GoldCommittee.id.label("committee_id"),
+                GoldCommittee.name.label("committee_name"),
+                GoldCommittee.committee_type,
+                GoldCommittee.state.label("committee_state"),
+                GoldCommittee.party.label("committee_party"),
+                func.count(GoldContribution.id).label("contribution_count"),
+                func.sum(GoldContribution.amount).label("total_amount"),
+                func.min(GoldContribution.contribution_date).label("first_contribution_date"),
+                func.max(GoldContribution.contribution_date).label("last_contribution_date"),
+            )
+            .join(GoldCommittee, GoldContribution.recipient_committee_id == GoldCommittee.id)
+            .where(GoldContribution.contributor_id == contributor_id)
+            .group_by(
+                GoldCommittee.id,
+                GoldCommittee.name,
+                GoldCommittee.committee_type,
+                GoldCommittee.state,
+                GoldCommittee.party,
+            )
+        )
+
+        # Get total count of recipients
+        count_query = (
+            select(func.count(func.distinct(GoldContribution.recipient_committee_id)))
+            .where(GoldContribution.contributor_id == contributor_id)
+        )
+        total_count = db.execute(count_query).scalar_one()
+
+        # Apply sorting
+        sort_column_map = {
+            "committee_name": GoldCommittee.name,
+            "total_amount": func.sum(GoldContribution.amount),
+            "contribution_count": func.count(GoldContribution.id),
+            "first_date": func.min(GoldContribution.contribution_date),
+            "last_date": func.max(GoldContribution.contribution_date),
+        }
+
+        sort_column = sort_column_map.get(sort_by, func.sum(GoldContribution.amount))
+
+        if sort_direction == "asc":
+            query = query.order_by(sort_column.asc())
+        else:
+            query = query.order_by(sort_column.desc())
+
+        # Execute query
+        results = db.execute(query).all()
+
+        # Convert to ContributorRecipient objects
+        recipients = [
+            ContributorRecipient(
+                committee_id=row.committee_id,
+                committee_name=row.committee_name,
+                committee_type=row.committee_type,
+                committee_state=row.committee_state,
+                committee_party=row.committee_party,
+                contribution_count=row.contribution_count,
+                total_amount=row.total_amount,
+                first_contribution_date=row.first_contribution_date,
+                last_contribution_date=row.last_contribution_date,
+            )
+            for row in results
+        ]
+
+        return recipients, total_count
