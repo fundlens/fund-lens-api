@@ -47,10 +47,18 @@ class CommitteeFilters(BaseModel):
     party: str | None = Field(default=None, description="Filter by party")
     is_active: bool | None = Field(default=None, description="Filter by active status")
     candidate_id: int | None = Field(default=None, description="Filter by associated candidate ID")
+    min_total_received: float | None = Field(
+        default=None,
+        ge=0,
+        description="Minimum total amount received (filters by stats.total_amount_received)"
+    )
 
     def to_filter_dict(self) -> dict[str, str | bool | int]:
-        """Convert to dict of non-None filters for SQLAlchemy queries."""
-        return {k: v for k, v in self.model_dump().items() if v is not None}
+        """Convert to dict of non-None filters for SQLAlchemy queries.
+
+        Note: 'min_total_received' is excluded as it requires special handling.
+        """
+        return {k: v for k, v in self.model_dump().items() if v is not None and k != 'min_total_received'}
 
 
 class CommitteeStats(BaseModel):

@@ -43,13 +43,18 @@ class CandidateFilters(BaseModel):
     is_active: bool | None = Field(default=None, description="Filter by active status")
     district: str | None = Field(default=None, description="Filter by district")
     level: str | None = Field(default=None, description="Filter by level (federal or state)")
+    min_total_amount: float | None = Field(
+        default=None,
+        ge=0,
+        description="Minimum total fundraising amount (filters by stats.total_amount)"
+    )
 
     def to_filter_dict(self) -> dict[str, str | bool]:
         """Convert to dict of non-None filters for SQLAlchemy queries.
 
-        Note: 'level' is excluded as it requires special handling (IN clause).
+        Note: 'level' and 'min_total_amount' are excluded as they require special handling.
         """
-        return {k: v for k, v in self.model_dump().items() if v is not None and k != 'level'}
+        return {k: v for k, v in self.model_dump().items() if v is not None and k not in ['level', 'min_total_amount']}
 
 
 class CandidateStats(BaseModel):

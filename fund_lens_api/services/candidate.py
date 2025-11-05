@@ -33,11 +33,42 @@ class CandidateService:
         Returns:
             Tuple of (candidates list with optional stats, total count)
         """
-        # Build base query
-        query = select(GoldCandidate)
-        count_query = select(func.count()).select_from(GoldCandidate)
+        # Build stats subquery if filtering by min_total_amount
+        stats_subquery = None
+        if include_stats and filters.min_total_amount is not None:
+            stats_subquery = (
+                select(
+                    GoldContribution.recipient_candidate_id.label("candidate_id"),
+                    func.count(GoldContribution.id).label("total_contributions"),
+                    func.coalesce(func.sum(GoldContribution.amount), 0).label("total_amount"),
+                    func.count(func.distinct(GoldContribution.contributor_id)).label(
+                        "unique_contributors"
+                    ),
+                    func.coalesce(func.avg(GoldContribution.amount), 0).label("avg_contribution"),
+                )
+                .group_by(GoldContribution.recipient_candidate_id)
+                .subquery()
+            )
 
-        # Apply standard filters (excludes 'level' which needs special handling)
+        # Build base query
+        if stats_subquery is not None:
+            # Join with stats for filtering
+            query = (
+                select(GoldCandidate)
+                .join(stats_subquery, GoldCandidate.id == stats_subquery.c.candidate_id)
+                .where(stats_subquery.c.total_amount >= filters.min_total_amount)
+            )
+            count_query = (
+                select(func.count())
+                .select_from(GoldCandidate)
+                .join(stats_subquery, GoldCandidate.id == stats_subquery.c.candidate_id)
+                .where(stats_subquery.c.total_amount >= filters.min_total_amount)
+            )
+        else:
+            query = select(GoldCandidate)
+            count_query = select(func.count()).select_from(GoldCandidate)
+
+        # Apply standard filters (excludes 'level' and 'min_total_amount' which need special handling)
         filter_dict = filters.to_filter_dict()
         for field, value in filter_dict.items():
             column = cast(InstrumentedAttribute[Any], getattr(GoldCandidate, field))
@@ -56,7 +87,7 @@ class CandidateService:
                 query = query.where(GoldCandidate.office.not_in(['H', 'S', 'P']))
                 count_query = count_query.where(GoldCandidate.office.not_in(['H', 'S', 'P']))
 
-        # Get total count
+        # Get total count (reflects all filters including min_total_amount)
         total_count = db.execute(count_query).scalar_one()
 
         # Apply pagination and ordering

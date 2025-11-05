@@ -57,28 +57,52 @@ class CommitteeService:
                 .subquery()
             )
 
-            # Main query with LEFT JOIN to stats
-            query = (
-                select(
-                    GoldCommittee,
-                    stats_subquery.c.total_contributions_received,
-                    stats_subquery.c.total_amount_received,
-                    stats_subquery.c.unique_contributors,
-                    stats_subquery.c.avg_contribution,
+            # Main query - use JOIN instead of LEFT JOIN if filtering by min_total_received
+            if filters.min_total_received is not None:
+                query = (
+                    select(
+                        GoldCommittee,
+                        stats_subquery.c.total_contributions_received,
+                        stats_subquery.c.total_amount_received,
+                        stats_subquery.c.unique_contributors,
+                        stats_subquery.c.avg_contribution,
+                    )
+                    .join(stats_subquery, GoldCommittee.id == stats_subquery.c.committee_id)
+                    .where(stats_subquery.c.total_amount_received >= filters.min_total_received)
                 )
-                .outerjoin(stats_subquery, GoldCommittee.id == stats_subquery.c.committee_id)
-            )
+            else:
+                query = (
+                    select(
+                        GoldCommittee,
+                        stats_subquery.c.total_contributions_received,
+                        stats_subquery.c.total_amount_received,
+                        stats_subquery.c.unique_contributors,
+                        stats_subquery.c.avg_contribution,
+                    )
+                    .outerjoin(stats_subquery, GoldCommittee.id == stats_subquery.c.committee_id)
+                )
 
             # Apply filters
             for field, value in filter_dict.items():
                 column = cast(InstrumentedAttribute[Any], getattr(GoldCommittee, field))
                 query = query.where(column == value)
 
-            # Get total count (without stats join)
-            count_query = select(func.count()).select_from(GoldCommittee)
-            for field, value in filter_dict.items():
-                column = cast(InstrumentedAttribute[Any], getattr(GoldCommittee, field))
-                count_query = count_query.where(column == value)
+            # Get total count - include stats join if filtering by min_total_received
+            if filters.min_total_received is not None:
+                count_query = (
+                    select(func.count())
+                    .select_from(GoldCommittee)
+                    .join(stats_subquery, GoldCommittee.id == stats_subquery.c.committee_id)
+                    .where(stats_subquery.c.total_amount_received >= filters.min_total_received)
+                )
+                for field, value in filter_dict.items():
+                    column = cast(InstrumentedAttribute[Any], getattr(GoldCommittee, field))
+                    count_query = count_query.where(column == value)
+            else:
+                count_query = select(func.count()).select_from(GoldCommittee)
+                for field, value in filter_dict.items():
+                    column = cast(InstrumentedAttribute[Any], getattr(GoldCommittee, field))
+                    count_query = count_query.where(column == value)
             total_count = db.execute(count_query).scalar_one()
 
             # Apply sorting
