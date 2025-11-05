@@ -197,3 +197,14 @@ class ContributorContributionsResponse(BaseModel):
     """Response for contributor contributions list."""
 
     contributions: list[ContributionWithCommittee] = Field(description="List of contributions")
+
+
+class TopContributor(BaseModel):
+    """Top contributor with aggregated statistics."""
+
+    contributor: ContributorList = Field(description="Contributor details")
+    total_amount: float = Field(description="Total amount contributed")
+    contribution_count: int = Field(description="Number of contributions")
+    unique_recipients: int = Field(description="Number of unique recipients")
+
+    model_config = ConfigDict(from_attributes=True)

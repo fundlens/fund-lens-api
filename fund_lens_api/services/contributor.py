@@ -240,6 +240,38 @@ class ContributorService:
         return [(row[0], float(row[1]), row[2], row[3]) for row in results]
 
     @staticmethod
+    def count_top_contributors(
+            db: Session,
+            state: str | None = None,
+            entity_type: str | None = None,
+    ) -> int:
+        """Count contributors matching the top contributors filters.
+
+        Args:
+            db: Database session
+            state: Optional state filter
+            entity_type: Optional entity type filter
+
+        Returns:
+            Total count of contributors matching the filters
+        """
+        # Build count query with same filters as get_top_contributors
+        # Count distinct contributors who have made contributions
+        query = (
+            select(func.count(func.distinct(GoldContributor.id)))
+            .select_from(GoldContributor)
+            .join(GoldContribution, GoldContribution.contributor_id == GoldContributor.id)
+        )
+
+        # Apply filters if provided
+        if state:
+            query = query.where(GoldContributor.state == state)
+        if entity_type:
+            query = query.where(GoldContributor.entity_type == entity_type)
+
+        return db.execute(query).scalar_one()
+
+    @staticmethod
     def get_contributors_by_candidate(
         db: Session,
         candidate_id: int,

@@ -18,6 +18,7 @@ from fund_lens_api.schemas.contributor import (
     ContributorStats,
     ContributorsByCandidateResponse,
     ContributorsByCommitteeResponse,
+    TopContributor,
 )
 from fund_lens_api.services.contributor import ContributorService
 
@@ -193,7 +194,7 @@ def search_contributors_aggregated(
 
 
 # noinspection PyUnusedLocal
-@router.get("/top", response_model=list[dict])
+@router.get("/top", response_model=PaginatedResponse[TopContributor])
 @limiter.limit(RATE_LIMIT_DEFAULT)
 def get_top_contributors(
         request: Request,
@@ -201,7 +202,7 @@ def get_top_contributors(
         limit: Annotated[int, Query(ge=1, le=500, description="Maximum number of contributors to return")] = 10,
         state: Annotated[str | None, Query(max_length=2, description="Filter by state (two-letter code)")] = None,
         entity_type: Annotated[str | None, Query(description="Filter by entity type (IND, ORG, PAC, etc.)")] = None,
-) -> list[dict]:
+) -> PaginatedResponse[TopContributor]:
     """Get top contributors by total contribution amount.
 
     Optionally filter by state and/or entity type.
@@ -213,22 +214,44 @@ def get_top_contributors(
     - `/contributors/top?limit=25&state=MD`
     - `/contributors/top?limit=25&entity_type=ORG&state=VA`
     """
+    # Normalize filters
+    normalized_state = state.upper() if state else None
+    normalized_entity_type = entity_type.upper() if entity_type else None
+
+    # Get top contributors
     top_contributors = ContributorService.get_top_contributors(
         db,
         limit=limit,
-        state=state.upper() if state else None,
-        entity_type=entity_type.upper() if entity_type else None,
+        state=normalized_state,
+        entity_type=normalized_entity_type,
     )
 
-    return [
-        {
-            "contributor": ContributorList.model_validate(contributor),
-            "total_amount": total_amount,
-            "contribution_count": contribution_count,
-            "unique_recipients": unique_recipients,
-        }
+    # Get total count
+    total_count = ContributorService.count_top_contributors(
+        db,
+        state=normalized_state,
+        entity_type=normalized_entity_type,
+    )
+
+    # Build response items
+    items = [
+        TopContributor(
+            contributor=ContributorList.model_validate(contributor),
+            total_amount=total_amount,
+            contribution_count=contribution_count,
+            unique_recipients=unique_recipients,
+        )
         for contributor, total_amount, contribution_count, unique_recipients in top_contributors
     ]
+
+    return PaginatedResponse(
+        items=items,
+        meta=create_pagination_meta(
+            page=1,
+            page_size=limit,
+            total_items=total_count,
+        ),
+    )
 
 
 # noinspection PyUnusedLocal
