@@ -300,15 +300,19 @@ def get_contributor_contributions(
         db: DBSession,
         contributor_id: int,
         page_size: Annotated[int, Query(ge=1, le=100, description="Number of contributions to return")] = 100,
+        sort_by: Annotated[str, Query(pattern="^(recipient|date|amount)$", description="Sort column: recipient, date, or amount")] = "amount",
+        sort_direction: Annotated[str, Query(pattern="^(asc|desc)$", description="Sort direction: asc or desc")] = "desc",
 ) -> ContributorContributionsResponse:
     """Get all contributions made by a specific contributor.
 
-    Returns individual contributions sorted by amount (largest first),
+    Returns individual contributions with sorting and pagination,
     including committee information for each contribution.
 
     Examples:
-    - `/contributors/123/contributions` - Get first 100 contributions
+    - `/contributors/123/contributions` - Get first 100 contributions (default: sorted by amount desc)
     - `/contributors/123/contributions?page_size=50` - Get first 50 contributions
+    - `/contributors/123/contributions?sort_by=recipient&sort_direction=asc` - Sort by committee name A-Z
+    - `/contributors/123/contributions?sort_by=date&sort_direction=desc` - Sort by most recent date
     """
     # Verify contributor exists
     contributor = ContributorService.get_contributor_by_id(db, contributor_id)
@@ -319,6 +323,8 @@ def get_contributor_contributions(
         db,
         contributor_id,
         limit=page_size,
+        sort_by=sort_by,
+        sort_direction=sort_direction,
     )
 
     return ContributorContributionsResponse(contributions=contributions)

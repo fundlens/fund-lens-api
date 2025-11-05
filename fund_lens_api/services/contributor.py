@@ -846,6 +846,8 @@ class ContributorService:
         db: Session,
         contributor_id: int,
         limit: int = 100,
+        sort_by: str = "amount",
+        sort_direction: str = "desc",
     ) -> list[ContributionWithCommittee]:
         """Get all contributions made by a specific contributor.
 
@@ -853,6 +855,8 @@ class ContributorService:
             db: Database session
             contributor_id: Contributor ID
             limit: Maximum number of contributions to return
+            sort_by: Column to sort by (recipient, date, or amount)
+            sort_direction: Sort direction (asc or desc)
 
         Returns:
             List of contributions with committee information
@@ -876,9 +880,26 @@ class ContributorService:
                 GoldContribution.recipient_committee_id == GoldCommittee.id,
             )
             .where(GoldContribution.contributor_id == contributor_id)
-            .order_by(GoldContribution.amount.desc())
-            .limit(limit)
         )
+
+        # Map sort_by values to actual column references
+        sort_column_map = {
+            "recipient": GoldCommittee.name,
+            "date": GoldContribution.contribution_date,
+            "amount": GoldContribution.amount,
+        }
+
+        # Get the column to sort by
+        sort_column = sort_column_map.get(sort_by, GoldContribution.amount)
+
+        # Apply sort direction
+        if sort_direction == "asc":
+            query = query.order_by(sort_column.asc())
+        else:
+            query = query.order_by(sort_column.desc())
+
+        # Apply limit
+        query = query.limit(limit)
 
         results = db.execute(query).all()
 
