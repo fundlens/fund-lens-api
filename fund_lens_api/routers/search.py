@@ -32,7 +32,7 @@ def unified_search(
         ),
     ] = None,
     page_size: Annotated[
-        int, Query(ge=1, le=50, description="Number of results per category")
+        int, Query(ge=1, le=1000, description="Number of results per category")
     ] = 10,
 ) -> UnifiedSearchResponse:
     """Unified search endpoint that searches across multiple resource types.
