@@ -200,7 +200,7 @@ def search_contributors_aggregated(
 def get_top_contributors(
         request: Request,
         db: DBSession,
-        limit: Annotated[int, Query(ge=1, le=500, description="Maximum number of contributors to return")] = 10,
+        limit: Annotated[int, Query(ge=1, le=1000, description="Maximum number of contributors to return")] = 10,
         state: Annotated[str | None, Query(max_length=2, description="Filter by state (two-letter code)")] = None,
         entity_type: Annotated[str | None, Query(description="Filter by entity type (IND, ORG, PAC, etc.)")] = None,
 ) -> PaginatedResponse[TopContributor]:
@@ -285,7 +285,7 @@ def get_contributor_contributions(
         request: Request,
         db: DBSession,
         contributor_id: int,
-        page_size: Annotated[int, Query(ge=1, le=100, description="Number of contributions to return")] = 100,
+        page_size: Annotated[int, Query(ge=1, le=1000, description="Number of contributions to return")] = 1000,
         sort_by: Annotated[str, Query(pattern="^(recipient|date|amount)$", description="Sort column: recipient, date, or amount")] = "amount",
         sort_direction: Annotated[str, Query(pattern="^(asc|desc)$", description="Sort direction: asc or desc")] = "desc",
         start_date: Annotated[date | None, Query(description="Filter contributions from this date (inclusive, format: YYYY-MM-DD)")] = None,
