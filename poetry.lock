@@ -222,7 +222,7 @@ sqlalchemy = ">=2.0.44,<3.0.0"
 
 [package.source]
 type = "git"
-url = "ssh://git@github.com/fundlens/fund-lens-models.git"
+url = "https://github.com/fundlens/fund-lens-models.git"
 reference = "v0.3.0"
 resolved_reference = "4f8a7934d9ba0317bfade11e044d697d79d90fc1"
 
@@ -1856,4 +1856,4 @@ dev = ["pytest", "setuptools"]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.11,<4.0"
-content-hash = "11a598916789129753d31ff332add3a921fbb31d3d821d5a574f82451e1203c7"
+content-hash = "665a83ba99a64186bcf2b04b300deb5269770ba718b0f94e83ca2d0801ab6910"

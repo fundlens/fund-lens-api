@@ -15,7 +15,7 @@ dependencies = [
     "sqlalchemy>=2.0.44,<3.0.0",
     "psycopg2-binary>=2.9.9",
     "slowapi>=0.1.9",
-    "fund-lens-models @ git+ssh://git@github.com/fundlens/fund-lens-models.git@v0.3.0",
+    "fund-lens-models @ git+https://github.com/fundlens/fund-lens-models.git@v0.3.0",
 ]
 
 [build-system]
