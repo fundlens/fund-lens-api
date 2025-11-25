@@ -3,11 +3,23 @@
 from typing import Any, Literal, cast
 
 from fund_lens_models.gold import GoldCandidate, GoldContribution
-from sqlalchemy import func, select
+from sqlalchemy import Column, Integer, Numeric, Table, MetaData, func, select, text
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import InstrumentedAttribute
 
 from fund_lens_api.schemas.candidate import CandidateFilters, CandidateStats, CandidateWithStats
+
+# Define the materialized view as a SQLAlchemy table for querying
+_metadata = MetaData()
+mv_candidate_stats = Table(
+    "mv_candidate_stats",
+    _metadata,
+    Column("candidate_id", Integer, primary_key=True),
+    Column("total_contributions", Integer),
+    Column("total_amount", Numeric(12, 2)),
+    Column("unique_contributors", Integer),
+    Column("avg_contribution", Numeric(12, 2)),
+)
 
 
 class CandidateService:
@@ -20,6 +32,8 @@ class CandidateService:
             offset: int = 0,
             limit: int = 50,
             include_stats: bool = False,
+            sort_by: Literal["name", "total_amount", "total_contributions"] = "name",
+            order: Literal["asc", "desc"] = "asc",
     ) -> tuple[list[CandidateWithStats], int]:
         """List candidates with filtering and pagination.
 
@@ -29,41 +43,34 @@ class CandidateService:
             offset: Pagination offset
             limit: Pagination limit
             include_stats: Whether to include fundraising statistics
+            sort_by: Sort by field (name, total_amount, total_contributions)
+            order: Sort order (asc, desc)
 
         Returns:
             Tuple of (candidates list with optional stats, total count)
         """
-        # Build stats subquery if filtering by min_total_amount
-        stats_subquery = None
-        if include_stats and filters.min_total_amount is not None:
-            stats_subquery = (
-                select(
-                    GoldContribution.recipient_candidate_id.label("candidate_id"),
-                    func.count(GoldContribution.id).label("total_contributions"),
-                    func.coalesce(func.sum(GoldContribution.amount), 0).label("total_amount"),
-                    func.count(func.distinct(GoldContribution.contributor_id)).label(
-                        "unique_contributors"
-                    ),
-                    func.coalesce(func.avg(GoldContribution.amount), 0).label("avg_contribution"),
-                )
-                .group_by(GoldContribution.recipient_candidate_id)
-                .subquery()
-            )
+        # Determine if we need to join with stats (for filtering or sorting by stats columns)
+        needs_stats_join = (
+            (include_stats and filters.min_total_amount is not None) or
+            sort_by in ("total_amount", "total_contributions")
+        )
 
         # Build base query
-        if stats_subquery is not None:
-            # Join with stats for filtering
+        if needs_stats_join:
+            # Join with materialized view for filtering/sorting by stats
             query = (
                 select(GoldCandidate)
-                .join(stats_subquery, GoldCandidate.id == stats_subquery.c.candidate_id)
-                .where(stats_subquery.c.total_amount >= filters.min_total_amount)
+                .outerjoin(mv_candidate_stats, GoldCandidate.id == mv_candidate_stats.c.candidate_id)
             )
             count_query = (
                 select(func.count())
                 .select_from(GoldCandidate)
-                .join(stats_subquery, GoldCandidate.id == stats_subquery.c.candidate_id)
-                .where(stats_subquery.c.total_amount >= filters.min_total_amount)
+                .outerjoin(mv_candidate_stats, GoldCandidate.id == mv_candidate_stats.c.candidate_id)
             )
+            # Apply min_total_amount filter if specified
+            if include_stats and filters.min_total_amount is not None:
+                query = query.where(mv_candidate_stats.c.total_amount >= filters.min_total_amount)
+                count_query = count_query.where(mv_candidate_stats.c.total_amount >= filters.min_total_amount)
         else:
             query = select(GoldCandidate)
             count_query = select(func.count()).select_from(GoldCandidate)
@@ -90,8 +97,25 @@ class CandidateService:
         # Get total count (reflects all filters including min_total_amount)
         total_count = db.execute(count_query).scalar_one()
 
-        # Apply pagination and ordering
-        query = query.order_by(GoldCandidate.name).offset(offset).limit(limit)
+        # Apply sorting
+        if sort_by in ("total_amount", "total_contributions"):
+            sort_column = {
+                "total_amount": mv_candidate_stats.c.total_amount,
+                "total_contributions": mv_candidate_stats.c.total_contributions,
+            }[sort_by]
+            if order == "desc":
+                query = query.order_by(sort_column.desc().nulls_last(), GoldCandidate.name)
+            else:
+                query = query.order_by(sort_column.asc().nulls_last(), GoldCandidate.name)
+        else:
+            # Sort by name
+            if order == "desc":
+                query = query.order_by(GoldCandidate.name.desc())
+            else:
+                query = query.order_by(GoldCandidate.name.asc())
+
+        # Apply pagination
+        query = query.offset(offset).limit(limit)
 
         # Execute query
         candidates = list(db.execute(query).scalars().all())
@@ -171,14 +195,12 @@ class CandidateService:
         if is_active is not None:
             filters.append(GoldCandidate.is_active == is_active)
 
-        # If has_fundraising is requested, we need a subquery
+        # If has_fundraising is requested, use the materialized view
         if has_fundraising:
-            # Get candidate IDs with contributions
+            # Get candidate IDs with contributions from materialized view
             candidates_with_contributions = (
-                select(GoldContribution.recipient_candidate_id)
-                .where(GoldContribution.recipient_candidate_id.isnot(None))
-                .group_by(GoldContribution.recipient_candidate_id)
-                .having(func.sum(GoldContribution.amount) > 0)
+                select(mv_candidate_stats.c.candidate_id)
+                .where(mv_candidate_stats.c.total_amount > 0)
                 .scalar_subquery()
             )
             filters.append(GoldCandidate.id.in_(candidates_with_contributions))
@@ -200,23 +222,34 @@ class CandidateService:
 
     @staticmethod
     def get_candidate_stats(db: Session, candidate_id: int) -> CandidateStats | None:
-        """Get aggregated statistics for a candidate."""
+        """Get aggregated statistics for a candidate.
+
+        Uses mv_candidate_stats materialized view for performance.
+        Stats exclude earmarked contributions for accurate totals.
+        """
         # Verify candidate exists
         candidate = CandidateService.get_candidate_by_id(db, candidate_id)
         if not candidate:
             return None
 
-        # Query contribution statistics
-        stats_query = select(
-            func.count(GoldContribution.id).label("total_contributions"),
-            func.coalesce(func.sum(GoldContribution.amount), 0).label("total_amount"),
-            func.count(func.distinct(GoldContribution.contributor_id)).label(
-                "unique_contributors"
-            ),
-            func.coalesce(func.avg(GoldContribution.amount), 0).label("avg_contribution"),
-        ).where(GoldContribution.recipient_candidate_id == candidate_id)
+        # Query from materialized view for fast lookup
+        stats_query = text("""
+            SELECT total_contributions, total_amount, unique_contributors, avg_contribution
+            FROM mv_candidate_stats
+            WHERE candidate_id = :candidate_id
+        """)
 
-        result = db.execute(stats_query).one()
+        result = db.execute(stats_query, {"candidate_id": candidate_id}).one_or_none()
+
+        if not result:
+            # Candidate exists but has no contributions (or all are earmarked)
+            return CandidateStats(
+                candidate_id=candidate_id,
+                total_contributions=0,
+                total_amount=0.0,
+                unique_contributors=0,
+                avg_contribution=0.0,
+            )
 
         return CandidateStats(
             candidate_id=candidate_id,
@@ -232,6 +265,8 @@ class CandidateService:
     ) -> dict[int, CandidateStats]:
         """Get aggregated statistics for multiple candidates in a single query.
 
+        Uses the mv_candidate_stats materialized view for fast lookups.
+
         Args:
             db: Database session
             candidate_ids: List of candidate IDs to fetch stats for
@@ -242,19 +277,16 @@ class CandidateService:
         if not candidate_ids:
             return {}
 
-        # Query contribution statistics for all candidates at once
+        # Query from materialized view for fast lookups
         stats_query = (
             select(
-                GoldContribution.recipient_candidate_id,
-                func.count(GoldContribution.id).label("total_contributions"),
-                func.coalesce(func.sum(GoldContribution.amount), 0).label("total_amount"),
-                func.count(func.distinct(GoldContribution.contributor_id)).label(
-                    "unique_contributors"
-                ),
-                func.coalesce(func.avg(GoldContribution.amount), 0).label("avg_contribution"),
+                mv_candidate_stats.c.candidate_id,
+                mv_candidate_stats.c.total_contributions,
+                mv_candidate_stats.c.total_amount,
+                mv_candidate_stats.c.unique_contributors,
+                mv_candidate_stats.c.avg_contribution,
             )
-            .where(GoldContribution.recipient_candidate_id.in_(candidate_ids))
-            .group_by(GoldContribution.recipient_candidate_id)
+            .where(mv_candidate_stats.c.candidate_id.in_(candidate_ids))
         )
 
         results = db.execute(stats_query).all()
@@ -262,8 +294,8 @@ class CandidateService:
         # Build stats dictionary
         stats_dict = {}
         for row in results:
-            stats_dict[row.recipient_candidate_id] = CandidateStats(
-                candidate_id=row.recipient_candidate_id,
+            stats_dict[row.candidate_id] = CandidateStats(
+                candidate_id=row.candidate_id,
                 total_contributions=row.total_contributions,
                 total_amount=float(row.total_amount),
                 unique_contributors=row.unique_contributors,
@@ -328,31 +360,16 @@ class CandidateService:
             List of candidates with optional stats, or tuple of (candidates, total_count)
         """
         if include_stats:
-            # Build query with stats aggregation
-            stats_subquery = (
-                select(
-                    GoldContribution.recipient_candidate_id.label("candidate_id"),
-                    func.count(GoldContribution.id).label("total_contributions"),
-                    func.coalesce(func.sum(GoldContribution.amount), 0).label("total_amount"),
-                    func.count(func.distinct(GoldContribution.contributor_id)).label(
-                        "unique_contributors"
-                    ),
-                    func.coalesce(func.avg(GoldContribution.amount), 0).label("avg_contribution"),
-                )
-                .group_by(GoldContribution.recipient_candidate_id)
-                .subquery()
-            )
-
-            # Main query with LEFT JOIN to stats
+            # Main query with LEFT JOIN to materialized view for fast stats
             query = (
                 select(
                     GoldCandidate,
-                    stats_subquery.c.total_contributions,
-                    stats_subquery.c.total_amount,
-                    stats_subquery.c.unique_contributors,
-                    stats_subquery.c.avg_contribution,
+                    mv_candidate_stats.c.total_contributions,
+                    mv_candidate_stats.c.total_amount,
+                    mv_candidate_stats.c.unique_contributors,
+                    mv_candidate_stats.c.avg_contribution,
                 )
-                .outerjoin(stats_subquery, GoldCandidate.id == stats_subquery.c.candidate_id)
+                .outerjoin(mv_candidate_stats, GoldCandidate.id == mv_candidate_stats.c.candidate_id)
                 .where(GoldCandidate.state == state)
             )
         else:
@@ -378,14 +395,14 @@ class CandidateService:
         # Apply has_fundraising filter
         if has_fundraising and include_stats:
             # Only include candidates with contributions (stats > 0)
-            query = query.where(stats_subquery.c.total_amount > 0)
+            query = query.where(mv_candidate_stats.c.total_amount > 0)
 
         # Apply sorting
         if include_stats and sort_by in ("total_amount", "total_contributions"):
             # Sort by stats fields (nulls last)
             sort_column = {
-                "total_amount": stats_subquery.c.total_amount,
-                "total_contributions": stats_subquery.c.total_contributions,
+                "total_amount": mv_candidate_stats.c.total_amount,
+                "total_contributions": mv_candidate_stats.c.total_contributions,
             }[sort_by]
             if order == "desc":
                 query = query.order_by(sort_column.desc().nulls_last(), GoldCandidate.name)
@@ -413,13 +430,13 @@ class CandidateService:
             if is_active is not None:
                 count_query = count_query.where(GoldCandidate.is_active == is_active)
             if has_fundraising and include_stats:
-                # For has_fundraising, we need to join with the stats subquery
+                # For has_fundraising, we need to join with the materialized view
                 count_query = (
                     select(func.count())
                     .select_from(GoldCandidate)
-                    .outerjoin(stats_subquery, GoldCandidate.id == stats_subquery.c.candidate_id)
+                    .outerjoin(mv_candidate_stats, GoldCandidate.id == mv_candidate_stats.c.candidate_id)
                     .where(GoldCandidate.state == state)
-                    .where(stats_subquery.c.total_amount > 0)
+                    .where(mv_candidate_stats.c.total_amount > 0)
                 )
                 if offices:
                     count_query = count_query.where(GoldCandidate.office.in_(offices))

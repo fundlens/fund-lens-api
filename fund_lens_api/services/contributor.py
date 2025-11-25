@@ -5,7 +5,7 @@ from decimal import Decimal
 from typing import Any, Literal, cast
 
 from fund_lens_models.gold import GoldCandidate, GoldCommittee, GoldContribution, GoldContributor
-from sqlalchemy import and_, func, select
+from sqlalchemy import and_, func, literal_column, select, text
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import InstrumentedAttribute
 
@@ -168,25 +168,37 @@ class ContributorService:
 
     @staticmethod
     def get_contributor_stats(db: Session, contributor_id: int) -> ContributorStats | None:
-        """Get aggregated statistics for a contributor."""
+        """Get aggregated statistics for a contributor.
+
+        Uses mv_contributor_stats materialized view for performance.
+        Stats exclude earmarked contributions for accurate totals.
+        """
         # Verify contributor exists
         contributor = ContributorService.get_contributor_by_id(db, contributor_id)
         if not contributor:
             return None
 
-        # Query contribution statistics
-        stats_query = select(
-            func.count(GoldContribution.id).label("total_contributions"),
-            func.coalesce(func.sum(GoldContribution.amount), 0).label("total_amount"),
-            func.count(func.distinct(GoldContribution.recipient_committee_id)).label(
-                "unique_recipients"
-            ),
-            func.coalesce(func.avg(GoldContribution.amount), 0).label("avg_contribution"),
-            func.min(GoldContribution.contribution_date).label("first_contribution_date"),
-            func.max(GoldContribution.contribution_date).label("last_contribution_date"),
-        ).where(GoldContribution.contributor_id == contributor_id)
+        # Query from materialized view for fast lookup
+        stats_query = text("""
+            SELECT total_contributions, total_amount, unique_recipients, avg_contribution,
+                   first_contribution_date, last_contribution_date
+            FROM mv_contributor_stats
+            WHERE contributor_id = :contributor_id
+        """)
 
-        result = db.execute(stats_query).one()
+        result = db.execute(stats_query, {"contributor_id": contributor_id}).one_or_none()
+
+        if not result:
+            # Contributor exists but has no contributions (or all are earmarked)
+            return ContributorStats(
+                contributor_id=contributor_id,
+                total_contributions=0,
+                total_amount=0.0,
+                unique_recipients=0,
+                avg_contribution=0.0,
+                first_contribution_date=None,
+                last_contribution_date=None,
+            )
 
         return ContributorStats(
             contributor_id=contributor_id,
@@ -207,6 +219,8 @@ class ContributorService:
     ) -> list[tuple[GoldContributor, float, int, int]]:
         """Get top contributors by total amount.
 
+        Uses mv_contributor_stats materialized view for performance.
+
         Args:
             db: Database session
             limit: Maximum number of contributors to return
@@ -216,28 +230,49 @@ class ContributorService:
         Returns:
             List of (contributor, total_amount, contribution_count, unique_recipients) tuples
         """
-        # Build query to get contributors with their total contribution amounts and counts
-        query = (
-            select(
-                GoldContributor,
-                func.sum(GoldContribution.amount).label("total_amount"),
-                func.count(GoldContribution.id).label("contribution_count"),
-                func.count(func.distinct(GoldContribution.recipient_committee_id)).label("unique_recipients"),
-            )
-            .join(GoldContribution, GoldContribution.contributor_id == GoldContributor.id)
-            .group_by(GoldContributor.id)
-            .order_by(func.sum(GoldContribution.amount).desc())
-            .limit(limit)
-        )
+        from sqlalchemy import text
 
-        # Apply filters if provided
+        # Build raw SQL query using materialized view
+        # This is much faster than aggregating 14M contributions
+        sql = """
+            SELECT
+                gc.id, gc.name, gc.city, gc.state, gc.zip,
+                gc.employer, gc.occupation, gc.entity_type, gc.match_confidence,
+                mv.total_amount, mv.total_contributions, mv.unique_recipients
+            FROM mv_contributor_stats mv
+            JOIN gold_contributor gc ON gc.id = mv.contributor_id
+            WHERE 1=1
+        """
+        params: dict[str, Any] = {"limit": limit}
+
         if state:
-            query = query.where(GoldContributor.state == state)
+            sql += " AND gc.state = :state"
+            params["state"] = state
         if entity_type:
-            query = query.where(GoldContributor.entity_type == entity_type)
+            sql += " AND gc.entity_type = :entity_type"
+            params["entity_type"] = entity_type
 
-        results = db.execute(query).all()
-        return [(row[0], float(row[1]), row[2], row[3]) for row in results]
+        sql += " ORDER BY mv.total_amount DESC LIMIT :limit"
+
+        results = db.execute(text(sql), params).fetchall()
+
+        # Convert to expected format: (GoldContributor, total_amount, contribution_count, unique_recipients)
+        output = []
+        for row in results:
+            contributor = GoldContributor(
+                id=row.id,
+                name=row.name,
+                city=row.city,
+                state=row.state,
+                zip=row.zip,
+                employer=row.employer,
+                occupation=row.occupation,
+                entity_type=row.entity_type,
+                match_confidence=row.match_confidence,
+            )
+            output.append((contributor, float(row.total_amount), row.total_contributions, row.unique_recipients))
+
+        return output
 
     @staticmethod
     def count_top_contributors(
@@ -247,6 +282,8 @@ class ContributorService:
     ) -> int:
         """Count contributors matching the top contributors filters.
 
+        Uses mv_contributor_stats materialized view for performance.
+
         Args:
             db: Database session
             state: Optional state filter
@@ -255,21 +292,26 @@ class ContributorService:
         Returns:
             Total count of contributors matching the filters
         """
-        # Build count query with same filters as get_top_contributors
-        # Count distinct contributors who have made contributions
-        query = (
-            select(func.count(func.distinct(GoldContributor.id)))
-            .select_from(GoldContributor)
-            .join(GoldContribution, GoldContribution.contributor_id == GoldContributor.id)
-        )
+        from sqlalchemy import text
 
-        # Apply filters if provided
+        # Build raw SQL query using materialized view
+        sql = """
+            SELECT COUNT(*)
+            FROM mv_contributor_stats mv
+            JOIN gold_contributor gc ON gc.id = mv.contributor_id
+            WHERE 1=1
+        """
+        params: dict[str, Any] = {}
+
         if state:
-            query = query.where(GoldContributor.state == state)
+            sql += " AND gc.state = :state"
+            params["state"] = state
         if entity_type:
-            query = query.where(GoldContributor.entity_type == entity_type)
+            sql += " AND gc.entity_type = :entity_type"
+            params["entity_type"] = entity_type
 
-        return db.execute(query).scalar_one()
+        result = db.execute(text(sql), params).scalar_one()
+        return result
 
     @staticmethod
     def get_contributors_by_candidate(
@@ -293,6 +335,8 @@ class ContributorService:
         """Get contributors to a specific candidate with aggregated stats.
 
         Returns detailed contributor information with optional nested contributions.
+        Uses mv_contributor_candidate_stats materialized view for fast aggregation
+        when no date filters are applied.
         """
         # Verify candidate exists
         candidate = db.execute(
@@ -301,92 +345,253 @@ class ContributorService:
         if not candidate:
             return None
 
-        # Build base query for aggregated contributors
-        # We need to aggregate contributions by contributor for this candidate
-        base_filters = [GoldContribution.recipient_candidate_id == candidate_id]
+        # Use materialized view when no date filters (much faster)
+        use_materialized_view = date_from is None and date_to is None
 
-        # Apply filters
-        if date_from:
-            base_filters.append(GoldContribution.contribution_date >= date_from)
-        if date_to:
-            base_filters.append(GoldContribution.contribution_date <= date_to)
-
-        # Build aggregation query
-        agg_query = (
-            select(
-                GoldContributor.id.label("contributor_id"),
-                GoldContributor.name.label("contributor_name"),
-                GoldContributor.city,
-                GoldContributor.state,
-                GoldContributor.zip,
-                GoldContributor.entity_type,
-                GoldContributor.employer,
-                GoldContributor.occupation,
-                func.sum(GoldContribution.amount).label("total_amount"),
-                func.count(GoldContribution.id).label("contribution_count"),
-                func.min(GoldContribution.contribution_date).label("first_contribution_date"),
-                func.max(GoldContribution.contribution_date).label("last_contribution_date"),
+        if use_materialized_view:
+            # Build query using mv_contributor_candidate_stats
+            mv_subquery = (
+                select(
+                    literal_column("contributor_id").label("contributor_id"),
+                    literal_column("contribution_count").label("contribution_count"),
+                    literal_column("total_amount").label("total_amount"),
+                    literal_column("first_contribution_date").label("first_contribution_date"),
+                    literal_column("last_contribution_date").label("last_contribution_date"),
+                )
+                .select_from(text("mv_contributor_candidate_stats"))
+                .where(text("candidate_id = :candidate_id"))
+                .subquery()
             )
-            .join(GoldContribution, GoldContribution.contributor_id == GoldContributor.id)
-            .where(and_(*base_filters))
-            .group_by(
-                GoldContributor.id,
-                GoldContributor.name,
-                GoldContributor.city,
-                GoldContributor.state,
-                GoldContributor.zip,
-                GoldContributor.entity_type,
-                GoldContributor.employer,
-                GoldContributor.occupation,
+
+            # Join with contributor details
+            agg_query = (
+                select(
+                    GoldContributor.id.label("contributor_id"),
+                    GoldContributor.name.label("contributor_name"),
+                    GoldContributor.city,
+                    GoldContributor.state,
+                    GoldContributor.zip,
+                    GoldContributor.entity_type,
+                    GoldContributor.employer,
+                    GoldContributor.occupation,
+                    mv_subquery.c.total_amount,
+                    mv_subquery.c.contribution_count,
+                    mv_subquery.c.first_contribution_date,
+                    mv_subquery.c.last_contribution_date,
+                )
+                .join(mv_subquery, GoldContributor.id == mv_subquery.c.contributor_id)
             )
-        )
 
-        # Apply contributor filters
-        if state:
-            agg_query = agg_query.having(GoldContributor.state == state)
-        if entity_type:
-            agg_query = agg_query.having(GoldContributor.entity_type == entity_type)
-        if search:
-            agg_query = agg_query.having(GoldContributor.name.ilike(f"%{search}%"))
+            # Apply contributor filters
+            if state:
+                agg_query = agg_query.where(GoldContributor.state == state)
+            if entity_type:
+                agg_query = agg_query.where(GoldContributor.entity_type == entity_type)
+            if search:
+                agg_query = agg_query.where(GoldContributor.name.ilike(f"%{search}%"))
+            if min_amount is not None:
+                agg_query = agg_query.where(mv_subquery.c.total_amount >= min_amount)
+            if max_amount is not None:
+                agg_query = agg_query.where(mv_subquery.c.total_amount <= max_amount)
 
-        # Create subquery for filtering and sorting
-        agg_subquery = agg_query.subquery()
+            # Apply sorting
+            sort_column_map = {
+                "total_amount": mv_subquery.c.total_amount,
+                "contribution_count": mv_subquery.c.contribution_count,
+                "name": GoldContributor.name,
+                "first_date": mv_subquery.c.first_contribution_date,
+                "last_date": mv_subquery.c.last_contribution_date,
+            }
+            sort_column = sort_column_map[sort_by]
+            if order == "desc":
+                agg_query = agg_query.order_by(sort_column.desc())
+            else:
+                agg_query = agg_query.order_by(sort_column.asc())
 
-        # Build main query from subquery
-        main_query = select(agg_subquery)
+            # Get total count
+            count_sql = text("""
+                SELECT COUNT(*) FROM mv_contributor_candidate_stats mv
+                JOIN gold_contributor gc ON gc.id = mv.contributor_id
+                WHERE mv.candidate_id = :candidate_id
+            """)
+            params: dict[str, Any] = {"candidate_id": candidate_id}
 
-        # Apply amount filters
-        if min_amount is not None:
-            main_query = main_query.where(agg_subquery.c.total_amount >= min_amount)
-        if max_amount is not None:
-            main_query = main_query.where(agg_subquery.c.total_amount <= max_amount)
+            # Add filter conditions to count
+            count_conditions = []
+            if state:
+                count_conditions.append("gc.state = :state")
+                params["state"] = state
+            if entity_type:
+                count_conditions.append("gc.entity_type = :entity_type")
+                params["entity_type"] = entity_type
+            if search:
+                count_conditions.append("gc.name ILIKE :search")
+                params["search"] = f"%{search}%"
+            if min_amount is not None:
+                count_conditions.append("mv.total_amount >= :min_amount")
+                params["min_amount"] = min_amount
+            if max_amount is not None:
+                count_conditions.append("mv.total_amount <= :max_amount")
+                params["max_amount"] = max_amount
 
-        # Apply sorting
-        sort_column_map = {
-            "total_amount": agg_subquery.c.total_amount,
-            "contribution_count": agg_subquery.c.contribution_count,
-            "name": agg_subquery.c.contributor_name,
-            "first_date": agg_subquery.c.first_contribution_date,
-            "last_date": agg_subquery.c.last_contribution_date,
-        }
-        sort_column = sort_column_map[sort_by]
-        if order == "desc":
-            main_query = main_query.order_by(sort_column.desc())
+            if count_conditions:
+                count_sql = text(f"""
+                    SELECT COUNT(*) FROM mv_contributor_candidate_stats mv
+                    JOIN gold_contributor gc ON gc.id = mv.contributor_id
+                    WHERE mv.candidate_id = :candidate_id AND {' AND '.join(count_conditions)}
+                """)
+
+            total_count = db.execute(count_sql, params).scalar_one()
+
+            # Apply pagination and execute
+            agg_query = agg_query.offset(offset).limit(limit)
+            results = db.execute(agg_query, {"candidate_id": candidate_id}).all()
+
+            # Get summary from materialized view
+            summary_sql = text("""
+                SELECT
+                    COUNT(*) as total_contributors,
+                    COALESCE(SUM(total_amount), 0) as total_amount_raised,
+                    COALESCE(SUM(contribution_count), 0) as total_contributions,
+                    MIN(first_contribution_date) as first_contribution,
+                    MAX(last_contribution_date) as last_contribution
+                FROM mv_contributor_candidate_stats
+                WHERE candidate_id = :candidate_id
+            """)
+            summary_result = db.execute(summary_sql, {"candidate_id": candidate_id}).one()
+
         else:
-            main_query = main_query.order_by(sort_column.asc())
+            # Fall back to real-time aggregation when date filters are applied
+            # Include conduit filtering for consistency with materialized view
+            base_filters = [
+                GoldContribution.recipient_candidate_id == candidate_id,
+                GoldContribution.is_earmark_receipt == False,  # noqa: E712
+                ~GoldContribution.source_transaction_id.like("%E"),
+                ~func.upper(func.coalesce(GoldContribution.memo_text, "")).like("%EARMARK%"),
+                ~func.upper(func.coalesce(GoldContribution.memo_text, "")).like("%CONDUIT%"),
+                ~func.upper(func.coalesce(GoldContribution.memo_text, "")).like("%ATTRIBUTION BELOW%"),
+            ]
+            if date_from:
+                base_filters.append(GoldContribution.contribution_date >= date_from)
+            if date_to:
+                base_filters.append(GoldContribution.contribution_date <= date_to)
 
-        # Get total count before pagination
-        count_query = select(func.count()).select_from(main_query.subquery())
-        total_count = db.execute(count_query).scalar_one()
+            # Build aggregation query
+            agg_query = (
+                select(
+                    GoldContributor.id.label("contributor_id"),
+                    GoldContributor.name.label("contributor_name"),
+                    GoldContributor.city,
+                    GoldContributor.state,
+                    GoldContributor.zip,
+                    GoldContributor.entity_type,
+                    GoldContributor.employer,
+                    GoldContributor.occupation,
+                    func.sum(GoldContribution.amount).label("total_amount"),
+                    func.count(GoldContribution.id).label("contribution_count"),
+                    func.min(GoldContribution.contribution_date).label("first_contribution_date"),
+                    func.max(GoldContribution.contribution_date).label("last_contribution_date"),
+                )
+                .join(GoldContribution, GoldContribution.contributor_id == GoldContributor.id)
+                .where(and_(*base_filters))
+                .group_by(
+                    GoldContributor.id,
+                    GoldContributor.name,
+                    GoldContributor.city,
+                    GoldContributor.state,
+                    GoldContributor.zip,
+                    GoldContributor.entity_type,
+                    GoldContributor.employer,
+                    GoldContributor.occupation,
+                )
+            )
 
-        # Apply pagination
-        main_query = main_query.offset(offset).limit(limit)
+            # Apply contributor filters
+            if state:
+                agg_query = agg_query.having(GoldContributor.state == state)
+            if entity_type:
+                agg_query = agg_query.having(GoldContributor.entity_type == entity_type)
+            if search:
+                agg_query = agg_query.having(GoldContributor.name.ilike(f"%{search}%"))
 
-        # Execute main query
-        results = db.execute(main_query).all()
+            # Create subquery for filtering and sorting
+            agg_subquery = agg_query.subquery()
+            main_query = select(agg_subquery)
+
+            # Apply amount filters
+            if min_amount is not None:
+                main_query = main_query.where(agg_subquery.c.total_amount >= min_amount)
+            if max_amount is not None:
+                main_query = main_query.where(agg_subquery.c.total_amount <= max_amount)
+
+            # Apply sorting
+            sort_column_map = {
+                "total_amount": agg_subquery.c.total_amount,
+                "contribution_count": agg_subquery.c.contribution_count,
+                "name": agg_subquery.c.contributor_name,
+                "first_date": agg_subquery.c.first_contribution_date,
+                "last_date": agg_subquery.c.last_contribution_date,
+            }
+            sort_column = sort_column_map[sort_by]
+            if order == "desc":
+                main_query = main_query.order_by(sort_column.desc())
+            else:
+                main_query = main_query.order_by(sort_column.asc())
+
+            # Get total count
+            count_query = select(func.count()).select_from(main_query.subquery())
+            total_count = db.execute(count_query).scalar_one()
+
+            # Apply pagination
+            main_query = main_query.offset(offset).limit(limit)
+            results = db.execute(main_query).all()
+
+            # Get summary statistics
+            summary_query = (
+                select(
+                    func.count(func.distinct(GoldContribution.contributor_id)).label(
+                        "total_contributors"
+                    ),
+                    func.coalesce(func.sum(GoldContribution.amount), 0).label("total_amount_raised"),
+                    func.count(GoldContribution.id).label("total_contributions"),
+                    func.min(GoldContribution.contribution_date).label("first_contribution"),
+                    func.max(GoldContribution.contribution_date).label("last_contribution"),
+                )
+                .where(and_(*base_filters))
+            )
+            summary_result = db.execute(summary_query).one()
 
         # Build contributor objects
         contributors = []
+        contributor_ids = [row.contributor_id for row in results]
+
+        # Batch fetch contributions if needed (avoid N+1 queries)
+        contributions_by_contributor: dict[int, list] = {}
+        if include_contributions and contributor_ids:
+            contrib_filters = [
+                GoldContribution.contributor_id.in_(contributor_ids),
+                GoldContribution.recipient_candidate_id == candidate_id,
+            ]
+            if date_from:
+                contrib_filters.append(GoldContribution.contribution_date >= date_from)
+            if date_to:
+                contrib_filters.append(GoldContribution.contribution_date <= date_to)
+
+            contrib_query = (
+                select(GoldContribution)
+                .where(and_(*contrib_filters))
+                .order_by(
+                    GoldContribution.contributor_id,
+                    GoldContribution.contribution_date.desc()
+                )
+            )
+            all_contributions = db.execute(contrib_query).scalars().all()
+
+            for c in all_contributions:
+                if c.contributor_id not in contributions_by_contributor:
+                    contributions_by_contributor[c.contributor_id] = []
+                contributions_by_contributor[c.contributor_id].append(c)
+
         for row in results:
             contributor_data = ContributorWithAggregates(
                 contributor_id=row.contributor_id,
@@ -404,24 +609,8 @@ class ContributorService:
                 contributions=None,
             )
 
-            # Optionally fetch individual contributions
             if include_contributions:
-                contrib_filters = [
-                    GoldContribution.contributor_id == row.contributor_id,
-                    GoldContribution.recipient_candidate_id == candidate_id,
-                ]
-                if date_from:
-                    contrib_filters.append(GoldContribution.contribution_date >= date_from)
-                if date_to:
-                    contrib_filters.append(GoldContribution.contribution_date <= date_to)
-
-                contrib_query = (
-                    select(GoldContribution)
-                    .where(and_(*contrib_filters))
-                    .order_by(GoldContribution.contribution_date.desc())
-                )
-                contributions = db.execute(contrib_query).scalars().all()
-
+                contribs = contributions_by_contributor.get(row.contributor_id, [])
                 contributor_data.contributions = [
                     ContributionSimple(
                         id=c.id,
@@ -429,25 +618,10 @@ class ContributorService:
                         amount=c.amount,
                         contribution_type=c.contribution_type,
                     )
-                    for c in contributions
+                    for c in contribs
                 ]
 
             contributors.append(contributor_data)
-
-        # Get summary statistics
-        summary_query = (
-            select(
-                func.count(func.distinct(GoldContribution.contributor_id)).label(
-                    "total_contributors"
-                ),
-                func.coalesce(func.sum(GoldContribution.amount), 0).label("total_amount_raised"),
-                func.count(GoldContribution.id).label("total_contributions"),
-                func.min(GoldContribution.contribution_date).label("first_contribution"),
-                func.max(GoldContribution.contribution_date).label("last_contribution"),
-            )
-            .where(and_(*base_filters))
-        )
-        summary_result = db.execute(summary_query).one()
 
         # Build response
         return ContributorsByCandidateResponse(
@@ -499,6 +673,8 @@ class ContributorService:
         """Get contributors to a specific committee with aggregated stats.
 
         Returns detailed contributor information with optional nested contributions.
+        Uses mv_contributor_committee_stats materialized view for fast aggregation
+        when no date filters are applied.
         """
         # Verify committee exists and get candidate info if applicable
         committee_query = select(GoldCommittee).where(GoldCommittee.id == committee_id)
@@ -515,91 +691,245 @@ class ContributorService:
             if candidate:
                 candidate_name = candidate.name
 
-        # Build base query for aggregated contributors
-        base_filters = [GoldContribution.recipient_committee_id == committee_id]
+        # Use materialized view when no date filters (much faster)
+        use_materialized_view = date_from is None and date_to is None
 
-        # Apply filters
-        if date_from:
-            base_filters.append(GoldContribution.contribution_date >= date_from)
-        if date_to:
-            base_filters.append(GoldContribution.contribution_date <= date_to)
-
-        # Build aggregation query (same structure as by-candidate)
-        agg_query = (
-            select(
-                GoldContributor.id.label("contributor_id"),
-                GoldContributor.name.label("contributor_name"),
-                GoldContributor.city,
-                GoldContributor.state,
-                GoldContributor.zip,
-                GoldContributor.entity_type,
-                GoldContributor.employer,
-                GoldContributor.occupation,
-                func.sum(GoldContribution.amount).label("total_amount"),
-                func.count(GoldContribution.id).label("contribution_count"),
-                func.min(GoldContribution.contribution_date).label("first_contribution_date"),
-                func.max(GoldContribution.contribution_date).label("last_contribution_date"),
+        if use_materialized_view:
+            # Build query using mv_contributor_committee_stats
+            mv_subquery = (
+                select(
+                    literal_column("contributor_id").label("contributor_id"),
+                    literal_column("contribution_count").label("contribution_count"),
+                    literal_column("total_amount").label("total_amount"),
+                    literal_column("first_contribution_date").label("first_contribution_date"),
+                    literal_column("last_contribution_date").label("last_contribution_date"),
+                )
+                .select_from(text("mv_contributor_committee_stats"))
+                .where(text("committee_id = :committee_id"))
+                .subquery()
             )
-            .join(GoldContribution, GoldContribution.contributor_id == GoldContributor.id)
-            .where(and_(*base_filters))
-            .group_by(
-                GoldContributor.id,
-                GoldContributor.name,
-                GoldContributor.city,
-                GoldContributor.state,
-                GoldContributor.zip,
-                GoldContributor.entity_type,
-                GoldContributor.employer,
-                GoldContributor.occupation,
+
+            # Join with contributor details
+            agg_query = (
+                select(
+                    GoldContributor.id.label("contributor_id"),
+                    GoldContributor.name.label("contributor_name"),
+                    GoldContributor.city,
+                    GoldContributor.state,
+                    GoldContributor.zip,
+                    GoldContributor.entity_type,
+                    GoldContributor.employer,
+                    GoldContributor.occupation,
+                    mv_subquery.c.total_amount,
+                    mv_subquery.c.contribution_count,
+                    mv_subquery.c.first_contribution_date,
+                    mv_subquery.c.last_contribution_date,
+                )
+                .join(mv_subquery, GoldContributor.id == mv_subquery.c.contributor_id)
             )
-        )
 
-        # Apply contributor filters
-        if state:
-            agg_query = agg_query.having(GoldContributor.state == state)
-        if entity_type:
-            agg_query = agg_query.having(GoldContributor.entity_type == entity_type)
-        if search:
-            agg_query = agg_query.having(GoldContributor.name.ilike(f"%{search}%"))
+            # Apply contributor filters
+            if state:
+                agg_query = agg_query.where(GoldContributor.state == state)
+            if entity_type:
+                agg_query = agg_query.where(GoldContributor.entity_type == entity_type)
+            if search:
+                agg_query = agg_query.where(GoldContributor.name.ilike(f"%{search}%"))
+            if min_amount is not None:
+                agg_query = agg_query.where(mv_subquery.c.total_amount >= min_amount)
+            if max_amount is not None:
+                agg_query = agg_query.where(mv_subquery.c.total_amount <= max_amount)
 
-        # Create subquery for filtering and sorting
-        agg_subquery = agg_query.subquery()
+            # Apply sorting
+            sort_column_map = {
+                "total_amount": mv_subquery.c.total_amount,
+                "contribution_count": mv_subquery.c.contribution_count,
+                "name": GoldContributor.name,
+                "first_date": mv_subquery.c.first_contribution_date,
+                "last_date": mv_subquery.c.last_contribution_date,
+            }
+            sort_column = sort_column_map[sort_by]
+            if order == "desc":
+                agg_query = agg_query.order_by(sort_column.desc())
+            else:
+                agg_query = agg_query.order_by(sort_column.asc())
 
-        # Build main query from subquery
-        main_query = select(agg_subquery)
+            # Get total count
+            count_sql = text("""
+                SELECT COUNT(*) FROM mv_contributor_committee_stats mv
+                JOIN gold_contributor gc ON gc.id = mv.contributor_id
+                WHERE mv.committee_id = :committee_id
+            """)
+            params: dict[str, Any] = {"committee_id": committee_id}
 
-        # Apply amount filters
-        if min_amount is not None:
-            main_query = main_query.where(agg_subquery.c.total_amount >= min_amount)
-        if max_amount is not None:
-            main_query = main_query.where(agg_subquery.c.total_amount <= max_amount)
+            # Add filter conditions to count
+            count_conditions = []
+            if state:
+                count_conditions.append("gc.state = :state")
+                params["state"] = state
+            if entity_type:
+                count_conditions.append("gc.entity_type = :entity_type")
+                params["entity_type"] = entity_type
+            if search:
+                count_conditions.append("gc.name ILIKE :search")
+                params["search"] = f"%{search}%"
+            if min_amount is not None:
+                count_conditions.append("mv.total_amount >= :min_amount")
+                params["min_amount"] = min_amount
+            if max_amount is not None:
+                count_conditions.append("mv.total_amount <= :max_amount")
+                params["max_amount"] = max_amount
 
-        # Apply sorting
-        sort_column_map = {
-            "total_amount": agg_subquery.c.total_amount,
-            "contribution_count": agg_subquery.c.contribution_count,
-            "name": agg_subquery.c.contributor_name,
-            "first_date": agg_subquery.c.first_contribution_date,
-            "last_date": agg_subquery.c.last_contribution_date,
-        }
-        sort_column = sort_column_map[sort_by]
-        if order == "desc":
-            main_query = main_query.order_by(sort_column.desc())
+            if count_conditions:
+                count_sql = text(f"""
+                    SELECT COUNT(*) FROM mv_contributor_committee_stats mv
+                    JOIN gold_contributor gc ON gc.id = mv.contributor_id
+                    WHERE mv.committee_id = :committee_id AND {' AND '.join(count_conditions)}
+                """)
+
+            total_count = db.execute(count_sql, params).scalar_one()
+
+            # Apply pagination and execute
+            agg_query = agg_query.offset(offset).limit(limit)
+            results = db.execute(agg_query, {"committee_id": committee_id}).all()
+
+            # Get summary from materialized view
+            summary_sql = text("""
+                SELECT
+                    COUNT(*) as total_contributors,
+                    COALESCE(SUM(total_amount), 0) as total_amount_raised,
+                    COALESCE(SUM(contribution_count), 0) as total_contributions,
+                    MIN(first_contribution_date) as first_contribution,
+                    MAX(last_contribution_date) as last_contribution
+                FROM mv_contributor_committee_stats
+                WHERE committee_id = :committee_id
+            """)
+            summary_result = db.execute(summary_sql, {"committee_id": committee_id}).one()
+
         else:
-            main_query = main_query.order_by(sort_column.asc())
+            # Fall back to real-time aggregation when date filters are applied
+            base_filters = [GoldContribution.recipient_committee_id == committee_id]
+            if date_from:
+                base_filters.append(GoldContribution.contribution_date >= date_from)
+            if date_to:
+                base_filters.append(GoldContribution.contribution_date <= date_to)
 
-        # Get total count before pagination
-        count_query = select(func.count()).select_from(main_query.subquery())
-        total_count = db.execute(count_query).scalar_one()
+            # Build aggregation query
+            agg_query = (
+                select(
+                    GoldContributor.id.label("contributor_id"),
+                    GoldContributor.name.label("contributor_name"),
+                    GoldContributor.city,
+                    GoldContributor.state,
+                    GoldContributor.zip,
+                    GoldContributor.entity_type,
+                    GoldContributor.employer,
+                    GoldContributor.occupation,
+                    func.sum(GoldContribution.amount).label("total_amount"),
+                    func.count(GoldContribution.id).label("contribution_count"),
+                    func.min(GoldContribution.contribution_date).label("first_contribution_date"),
+                    func.max(GoldContribution.contribution_date).label("last_contribution_date"),
+                )
+                .join(GoldContribution, GoldContribution.contributor_id == GoldContributor.id)
+                .where(and_(*base_filters))
+                .group_by(
+                    GoldContributor.id,
+                    GoldContributor.name,
+                    GoldContributor.city,
+                    GoldContributor.state,
+                    GoldContributor.zip,
+                    GoldContributor.entity_type,
+                    GoldContributor.employer,
+                    GoldContributor.occupation,
+                )
+            )
 
-        # Apply pagination
-        main_query = main_query.offset(offset).limit(limit)
+            # Apply contributor filters
+            if state:
+                agg_query = agg_query.having(GoldContributor.state == state)
+            if entity_type:
+                agg_query = agg_query.having(GoldContributor.entity_type == entity_type)
+            if search:
+                agg_query = agg_query.having(GoldContributor.name.ilike(f"%{search}%"))
 
-        # Execute main query
-        results = db.execute(main_query).all()
+            # Create subquery for filtering and sorting
+            agg_subquery = agg_query.subquery()
+            main_query = select(agg_subquery)
+
+            # Apply amount filters
+            if min_amount is not None:
+                main_query = main_query.where(agg_subquery.c.total_amount >= min_amount)
+            if max_amount is not None:
+                main_query = main_query.where(agg_subquery.c.total_amount <= max_amount)
+
+            # Apply sorting
+            sort_column_map = {
+                "total_amount": agg_subquery.c.total_amount,
+                "contribution_count": agg_subquery.c.contribution_count,
+                "name": agg_subquery.c.contributor_name,
+                "first_date": agg_subquery.c.first_contribution_date,
+                "last_date": agg_subquery.c.last_contribution_date,
+            }
+            sort_column = sort_column_map[sort_by]
+            if order == "desc":
+                main_query = main_query.order_by(sort_column.desc())
+            else:
+                main_query = main_query.order_by(sort_column.asc())
+
+            # Get total count
+            count_query = select(func.count()).select_from(main_query.subquery())
+            total_count = db.execute(count_query).scalar_one()
+
+            # Apply pagination
+            main_query = main_query.offset(offset).limit(limit)
+            results = db.execute(main_query).all()
+
+            # Get summary statistics
+            summary_query = (
+                select(
+                    func.count(func.distinct(GoldContribution.contributor_id)).label(
+                        "total_contributors"
+                    ),
+                    func.coalesce(func.sum(GoldContribution.amount), 0).label("total_amount_raised"),
+                    func.count(GoldContribution.id).label("total_contributions"),
+                    func.min(GoldContribution.contribution_date).label("first_contribution"),
+                    func.max(GoldContribution.contribution_date).label("last_contribution"),
+                )
+                .where(and_(*base_filters))
+            )
+            summary_result = db.execute(summary_query).one()
 
         # Build contributor objects
         contributors = []
+        contributor_ids = [row.contributor_id for row in results]
+
+        # Batch fetch contributions if needed (avoid N+1 queries)
+        contributions_by_contributor: dict[int, list] = {}
+        if include_contributions and contributor_ids:
+            contrib_filters = [
+                GoldContribution.contributor_id.in_(contributor_ids),
+                GoldContribution.recipient_committee_id == committee_id,
+            ]
+            if date_from:
+                contrib_filters.append(GoldContribution.contribution_date >= date_from)
+            if date_to:
+                contrib_filters.append(GoldContribution.contribution_date <= date_to)
+
+            contrib_query = (
+                select(GoldContribution)
+                .where(and_(*contrib_filters))
+                .order_by(
+                    GoldContribution.contributor_id,
+                    GoldContribution.contribution_date.desc()
+                )
+            )
+            all_contributions = db.execute(contrib_query).scalars().all()
+
+            for c in all_contributions:
+                if c.contributor_id not in contributions_by_contributor:
+                    contributions_by_contributor[c.contributor_id] = []
+                contributions_by_contributor[c.contributor_id].append(c)
+
         for row in results:
             contributor_data = ContributorWithAggregates(
                 contributor_id=row.contributor_id,
@@ -617,24 +947,8 @@ class ContributorService:
                 contributions=None,
             )
 
-            # Optionally fetch individual contributions
             if include_contributions:
-                contrib_filters = [
-                    GoldContribution.contributor_id == row.contributor_id,
-                    GoldContribution.recipient_committee_id == committee_id,
-                ]
-                if date_from:
-                    contrib_filters.append(GoldContribution.contribution_date >= date_from)
-                if date_to:
-                    contrib_filters.append(GoldContribution.contribution_date <= date_to)
-
-                contrib_query = (
-                    select(GoldContribution)
-                    .where(and_(*contrib_filters))
-                    .order_by(GoldContribution.contribution_date.desc())
-                )
-                contributions = db.execute(contrib_query).scalars().all()
-
+                contribs = contributions_by_contributor.get(row.contributor_id, [])
                 contributor_data.contributions = [
                     ContributionSimple(
                         id=c.id,
@@ -642,25 +956,10 @@ class ContributorService:
                         amount=c.amount,
                         contribution_type=c.contribution_type,
                     )
-                    for c in contributions
+                    for c in contribs
                 ]
 
             contributors.append(contributor_data)
-
-        # Get summary statistics
-        summary_query = (
-            select(
-                func.count(func.distinct(GoldContribution.contributor_id)).label(
-                    "total_contributors"
-                ),
-                func.coalesce(func.sum(GoldContribution.amount), 0).label("total_amount_raised"),
-                func.count(GoldContribution.id).label("total_contributions"),
-                func.min(GoldContribution.contribution_date).label("first_contribution"),
-                func.max(GoldContribution.contribution_date).label("last_contribution"),
-            )
-            .where(and_(*base_filters))
-        )
-        summary_result = db.execute(summary_query).one()
 
         # Build response
         return ContributorsByCommitteeResponse(
@@ -938,6 +1237,9 @@ class ContributorService:
     ) -> tuple[list[Any], int]:
         """Get pre-aggregated recipient data for a contributor.
 
+        Uses mv_contributor_committee_stats materialized view for performance.
+        Stats exclude earmarked contributions for accurate totals.
+
         Args:
             db: Database session
             contributor_id: Contributor ID
@@ -949,55 +1251,45 @@ class ContributorService:
         """
         from fund_lens_api.schemas.contributor import ContributorRecipient
 
-        # Build aggregation query
-        query = (
-            select(
-                GoldCommittee.id.label("committee_id"),
-                GoldCommittee.name.label("committee_name"),
-                GoldCommittee.committee_type,
-                GoldCommittee.state.label("committee_state"),
-                GoldCommittee.party.label("committee_party"),
-                func.count(GoldContribution.id).label("contribution_count"),
-                func.sum(GoldContribution.amount).label("total_amount"),
-                func.min(GoldContribution.contribution_date).label("first_contribution_date"),
-                func.max(GoldContribution.contribution_date).label("last_contribution_date"),
-            )
-            .join(GoldCommittee, GoldContribution.recipient_committee_id == GoldCommittee.id)
-            .where(GoldContribution.contributor_id == contributor_id)
-            .group_by(
-                GoldCommittee.id,
-                GoldCommittee.name,
-                GoldCommittee.committee_type,
-                GoldCommittee.state,
-                GoldCommittee.party,
-            )
-        )
-
-        # Get total count of recipients
-        count_query = (
-            select(func.count(func.distinct(GoldContribution.recipient_committee_id)))
-            .where(GoldContribution.contributor_id == contributor_id)
-        )
-        total_count = db.execute(count_query).scalar_one()
-
-        # Apply sorting
-        sort_column_map = {
-            "committee_name": GoldCommittee.name,
-            "total_amount": func.sum(GoldContribution.amount),
-            "contribution_count": func.count(GoldContribution.id),
-            "first_date": func.min(GoldContribution.contribution_date),
-            "last_date": func.max(GoldContribution.contribution_date),
+        # Build query using mv_contributor_committee_stats materialized view
+        # This is much faster than aggregating contributions on the fly
+        sort_column_sql = {
+            "committee_name": "gc.name",
+            "total_amount": "mv.total_amount",
+            "contribution_count": "mv.contribution_count",
+            "first_date": "mv.first_contribution_date",
+            "last_date": "mv.last_contribution_date",
         }
 
-        sort_column = sort_column_map.get(sort_by, func.sum(GoldContribution.amount))
+        sort_col = sort_column_sql.get(sort_by, "mv.total_amount")
+        sort_dir = "ASC" if sort_direction == "asc" else "DESC"
 
-        if sort_direction == "asc":
-            query = query.order_by(sort_column.asc())
-        else:
-            query = query.order_by(sort_column.desc())
+        query_sql = text(f"""
+            SELECT
+                gc.id AS committee_id,
+                gc.name AS committee_name,
+                gc.committee_type,
+                gc.state AS committee_state,
+                gc.party AS committee_party,
+                mv.contribution_count,
+                mv.total_amount,
+                mv.first_contribution_date,
+                mv.last_contribution_date
+            FROM mv_contributor_committee_stats mv
+            JOIN gold_committee gc ON gc.id = mv.committee_id
+            WHERE mv.contributor_id = :contributor_id
+            ORDER BY {sort_col} {sort_dir}
+        """)
 
-        # Execute query
-        results = db.execute(query).all()
+        results = db.execute(query_sql, {"contributor_id": contributor_id}).all()
+
+        # Get total count from materialized view
+        count_sql = text("""
+            SELECT COUNT(*)
+            FROM mv_contributor_committee_stats
+            WHERE contributor_id = :contributor_id
+        """)
+        total_count = db.execute(count_sql, {"contributor_id": contributor_id}).scalar_one()
 
         # Convert to ContributorRecipient objects
         recipients = [

@@ -2,8 +2,8 @@
 
 from decimal import Decimal
 
-from fund_lens_models.gold import GoldCandidate, GoldContribution
-from sqlalchemy import and_, func, select
+from fund_lens_models.gold import GoldCandidate
+from sqlalchemy import and_, select, text
 from sqlalchemy.orm import Session
 
 from fund_lens_api.schemas.candidate import CandidateStats
@@ -47,54 +47,43 @@ class RaceService:
         # Get candidate IDs
         candidate_ids = [c.id for c in candidates]
 
-        # Get stats for all candidates if requested
+        # Get stats for all candidates if requested using mv_candidate_stats
+        # This view pre-filters earmarked contributions for accurate totals
         stats_map = {}
-        if include_stats:
-            stats_query = (
-                select(
-                    GoldContribution.recipient_candidate_id,
-                    func.count(GoldContribution.id).label("total_contributions"),
-                    func.coalesce(func.sum(GoldContribution.amount), 0).label("total_amount"),
-                    func.count(func.distinct(GoldContribution.contributor_id)).label(
-                        "unique_contributors"
-                    ),
-                    func.coalesce(func.avg(GoldContribution.amount), 0).label("avg_contribution"),
-                )
-                .where(GoldContribution.recipient_candidate_id.in_(candidate_ids))
-                .group_by(GoldContribution.recipient_candidate_id)
-            )
-            stats_results = db.execute(stats_query).all()
+        if include_stats and candidate_ids:
+            stats_query = text("""
+                SELECT candidate_id, total_contributions, total_amount,
+                       unique_contributors, avg_contribution
+                FROM mv_candidate_stats
+                WHERE candidate_id = ANY(:candidate_ids)
+            """)
+            stats_results = db.execute(
+                stats_query, {"candidate_ids": candidate_ids}
+            ).all()
 
             for row in stats_results:
-                stats_map[row.recipient_candidate_id] = CandidateStats(
-                    candidate_id=row.recipient_candidate_id,
+                stats_map[row.candidate_id] = CandidateStats(
+                    candidate_id=row.candidate_id,
                     total_contributions=row.total_contributions,
                     total_amount=float(row.total_amount),
                     unique_contributors=row.unique_contributors,
                     avg_contribution=float(row.avg_contribution),
                 )
 
-        # Build race summary
-        summary_query = (
-            select(
-                func.count(func.distinct(GoldCandidate.id)).label("total_candidates"),
-                func.count(func.distinct(GoldCandidate.id)).filter(
-                    GoldCandidate.is_active == True
-                ).label("active_candidates"),
-                func.coalesce(func.sum(GoldContribution.amount), 0).label("total_amount_raised"),
-                func.count(GoldContribution.id).label("total_contributions"),
-                func.count(func.distinct(GoldContribution.contributor_id)).label(
-                    "unique_contributors"
-                ),
-            )
-            .select_from(GoldCandidate)
-            .outerjoin(
-                GoldContribution,
-                GoldContribution.recipient_candidate_id == GoldCandidate.id,
-            )
-            .where(and_(GoldCandidate.state == state, GoldCandidate.office == "S"))
-        )
-        summary_result = db.execute(summary_query).one()
+        # Build race summary by aggregating from mv_candidate_stats
+        # This uses pre-computed stats that exclude earmarked contributions
+        summary_query = text("""
+            SELECT
+                COUNT(DISTINCT c.id) AS total_candidates,
+                COUNT(DISTINCT c.id) FILTER (WHERE c.is_active = TRUE) AS active_candidates,
+                COALESCE(SUM(s.total_amount), 0) AS total_amount_raised,
+                COALESCE(SUM(s.total_contributions), 0) AS total_contributions,
+                COALESCE(SUM(s.unique_contributors), 0) AS unique_contributors
+            FROM gold_candidate c
+            LEFT JOIN mv_candidate_stats s ON s.candidate_id = c.id
+            WHERE c.state = :state AND c.office = 'S'
+        """)
+        summary_result = db.execute(summary_query, {"state": state}).one()
 
         summary = RaceSummary(
             total_candidates=summary_result.total_candidates,
@@ -167,60 +156,45 @@ class RaceService:
         # Get candidate IDs
         candidate_ids = [c.id for c in candidates]
 
-        # Get stats for all candidates if requested
+        # Get stats for all candidates if requested using mv_candidate_stats
+        # This view pre-filters earmarked contributions for accurate totals
         stats_map = {}
-        if include_stats:
-            stats_query = (
-                select(
-                    GoldContribution.recipient_candidate_id,
-                    func.count(GoldContribution.id).label("total_contributions"),
-                    func.coalesce(func.sum(GoldContribution.amount), 0).label("total_amount"),
-                    func.count(func.distinct(GoldContribution.contributor_id)).label(
-                        "unique_contributors"
-                    ),
-                    func.coalesce(func.avg(GoldContribution.amount), 0).label("avg_contribution"),
-                )
-                .where(GoldContribution.recipient_candidate_id.in_(candidate_ids))
-                .group_by(GoldContribution.recipient_candidate_id)
-            )
-            stats_results = db.execute(stats_query).all()
+        if include_stats and candidate_ids:
+            stats_query = text("""
+                SELECT candidate_id, total_contributions, total_amount,
+                       unique_contributors, avg_contribution
+                FROM mv_candidate_stats
+                WHERE candidate_id = ANY(:candidate_ids)
+            """)
+            stats_results = db.execute(
+                stats_query, {"candidate_ids": candidate_ids}
+            ).all()
 
             for row in stats_results:
-                stats_map[row.recipient_candidate_id] = CandidateStats(
-                    candidate_id=row.recipient_candidate_id,
+                stats_map[row.candidate_id] = CandidateStats(
+                    candidate_id=row.candidate_id,
                     total_contributions=row.total_contributions,
                     total_amount=float(row.total_amount),
                     unique_contributors=row.unique_contributors,
                     avg_contribution=float(row.avg_contribution),
                 )
 
-        # Build race summary
-        summary_query = (
-            select(
-                func.count(func.distinct(GoldCandidate.id)).label("total_candidates"),
-                func.count(func.distinct(GoldCandidate.id)).filter(
-                    GoldCandidate.is_active == True
-                ).label("active_candidates"),
-                func.coalesce(func.sum(GoldContribution.amount), 0).label("total_amount_raised"),
-                func.count(GoldContribution.id).label("total_contributions"),
-                func.count(func.distinct(GoldContribution.contributor_id)).label(
-                    "unique_contributors"
-                ),
-            )
-            .select_from(GoldCandidate)
-            .outerjoin(
-                GoldContribution,
-                GoldContribution.recipient_candidate_id == GoldCandidate.id,
-            )
-            .where(
-                and_(
-                    GoldCandidate.state == state,
-                    GoldCandidate.office == "H",
-                    GoldCandidate.district == district,
-                )
-            )
-        )
-        summary_result = db.execute(summary_query).one()
+        # Build race summary by aggregating from mv_candidate_stats
+        # This uses pre-computed stats that exclude earmarked contributions
+        summary_query = text("""
+            SELECT
+                COUNT(DISTINCT c.id) AS total_candidates,
+                COUNT(DISTINCT c.id) FILTER (WHERE c.is_active = TRUE) AS active_candidates,
+                COALESCE(SUM(s.total_amount), 0) AS total_amount_raised,
+                COALESCE(SUM(s.total_contributions), 0) AS total_contributions,
+                COALESCE(SUM(s.unique_contributors), 0) AS unique_contributors
+            FROM gold_candidate c
+            LEFT JOIN mv_candidate_stats s ON s.candidate_id = c.id
+            WHERE c.state = :state AND c.office = 'H' AND c.district = :district
+        """)
+        summary_result = db.execute(
+            summary_query, {"state": state, "district": district}
+        ).one()
 
         summary = RaceSummary(
             total_candidates=summary_result.total_candidates,
@@ -282,56 +256,43 @@ class RaceService:
         # Get candidate IDs
         candidate_ids = [c.id for c in candidates]
 
-        # Get stats for all candidates if requested
+        # Get stats for all candidates if requested using mv_candidate_stats
+        # This view pre-filters earmarked contributions for accurate totals
         stats_map = {}
         if include_stats and candidate_ids:
-            stats_query = (
-                select(
-                    GoldContribution.recipient_candidate_id,
-                    func.count(GoldContribution.id).label("total_contributions"),
-                    func.coalesce(func.sum(GoldContribution.amount), 0).label("total_amount"),
-                    func.count(func.distinct(GoldContribution.contributor_id)).label(
-                        "unique_contributors"
-                    ),
-                    func.coalesce(func.avg(GoldContribution.amount), 0).label("avg_contribution"),
-                )
-                .where(GoldContribution.recipient_candidate_id.in_(candidate_ids))
-                .group_by(GoldContribution.recipient_candidate_id)
-            )
-            stats_results = db.execute(stats_query).all()
+            stats_query = text("""
+                SELECT candidate_id, total_contributions, total_amount,
+                       unique_contributors, avg_contribution
+                FROM mv_candidate_stats
+                WHERE candidate_id = ANY(:candidate_ids)
+            """)
+            stats_results = db.execute(
+                stats_query, {"candidate_ids": candidate_ids}
+            ).all()
 
             for row in stats_results:
-                stats_map[row.recipient_candidate_id] = CandidateStats(
-                    candidate_id=row.recipient_candidate_id,
+                stats_map[row.candidate_id] = CandidateStats(
+                    candidate_id=row.candidate_id,
                     total_contributions=row.total_contributions,
                     total_amount=float(row.total_amount),
                     unique_contributors=row.unique_contributors,
                     avg_contribution=float(row.avg_contribution),
                 )
 
-        # Build race summary
+        # Build race summary by aggregating from mv_candidate_stats
+        # This uses pre-computed stats that exclude earmarked contributions
         if candidate_ids:
-            summary_query = (
-                select(
-                    func.count(func.distinct(GoldCandidate.id)).label("total_candidates"),
-                    func.count(func.distinct(GoldCandidate.id)).filter(
-                        GoldCandidate.is_active == True
-                    ).label("active_candidates"),
-                    func.coalesce(func.sum(GoldContribution.amount), 0).label(
-                        "total_amount_raised"
-                    ),
-                    func.count(GoldContribution.id).label("total_contributions"),
-                    func.count(func.distinct(GoldContribution.contributor_id)).label(
-                        "unique_contributors"
-                    ),
-                )
-                .select_from(GoldCandidate)
-                .outerjoin(
-                    GoldContribution,
-                    GoldContribution.recipient_candidate_id == GoldCandidate.id,
-                )
-                .where(GoldCandidate.office == "P")
-            )
+            summary_query = text("""
+                SELECT
+                    COUNT(DISTINCT c.id) AS total_candidates,
+                    COUNT(DISTINCT c.id) FILTER (WHERE c.is_active = TRUE) AS active_candidates,
+                    COALESCE(SUM(s.total_amount), 0) AS total_amount_raised,
+                    COALESCE(SUM(s.total_contributions), 0) AS total_contributions,
+                    COALESCE(SUM(s.unique_contributors), 0) AS unique_contributors
+                FROM gold_candidate c
+                LEFT JOIN mv_candidate_stats s ON s.candidate_id = c.id
+                WHERE c.office = 'P'
+            """)
             summary_result = db.execute(summary_query).one()
 
             summary = RaceSummary(
