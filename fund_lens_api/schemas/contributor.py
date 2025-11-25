@@ -16,7 +16,7 @@ class ContributorBase(BaseModel):
     city: str | None = Field(description="City")
     state: str | None = Field(description="State (two-letter code)")
     zip: str | None = Field(description="ZIP code (5 digits)")
-    entity_type: str = Field(description="Entity type (e.g., INDIVIDUAL, COMMITTEE, ORG)")
+    entity_type: str | None = Field(description="Entity type (e.g., INDIVIDUAL, COMMITTEE, ORG)")
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -86,7 +86,7 @@ class ContributorWithAggregates(BaseModel):
     city: str | None = Field(description="City")
     state: str | None = Field(description="State")
     zip: str | None = Field(description="ZIP code")
-    entity_type: str = Field(description="Entity type")
+    entity_type: str | None = Field(description="Entity type")
     employer: str | None = Field(description="Employer")
     occupation: str | None = Field(description="Occupation")
     total_amount: Decimal = Field(description="Total amount contributed to this recipient")
@@ -167,7 +167,7 @@ class ContributorSearchAggregated(BaseModel):
     city: str | None = Field(description="City")
     state: str | None = Field(description="State")
     zip: str | None = Field(description="ZIP code")
-    entity_type: str = Field(description="Entity type")
+    entity_type: str | None = Field(description="Entity type")
     employer: str | None = Field(description="Employer")
     occupation: str | None = Field(description="Occupation")
     total_amount: Decimal = Field(description="Total amount contributed across all recipients")
