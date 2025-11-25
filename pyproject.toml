@@ -15,7 +15,7 @@ dependencies = [
     "sqlalchemy>=2.0.44,<3.0.0",
     "psycopg2-binary>=2.9.9",
     "slowapi>=0.1.9",
-    "fund-lens-models @ git+https://github.com/fundlens/fund-lens-models.git@v0.1.0",
+    "fund-lens-models @ git+ssh://git@github.com/fundlens/fund-lens-models.git@v0.3.0",
 ]
 
 [build-system]
@@ -31,8 +31,7 @@ mypy = "^1.18.2"
 bandit = "^1.8.6"
 pre-commit = "^4.3.0"
 
-[tool.poetry.scripts]
-dev = "uvicorn fund_lens_api.main:app --reload --host 0.0.0.0 --port 8000"
+[tool.poetry.dependencies]
 
 [tool.mypy]
 plugins = ["sqlalchemy.ext.mypy.plugin", "pydantic.mypy"]

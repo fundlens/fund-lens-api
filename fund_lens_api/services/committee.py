@@ -3,7 +3,7 @@
 from typing import Any, cast
 
 from fund_lens_models.gold import GoldCandidate, GoldCommittee, GoldContribution
-from sqlalchemy import and_, desc, func, nullslast, select
+from sqlalchemy import and_, desc, func, literal_column, nullslast, select, text
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy.orm.attributes import InstrumentedAttribute
 
@@ -42,18 +42,17 @@ class CommitteeService:
         filter_dict = filters.to_filter_dict()
 
         if include_stats:
-            # Build stats subquery
+            # Use mv_committee_stats materialized view for performance
+            # This view excludes earmarked contributions for accurate stats
             stats_subquery = (
                 select(
-                    GoldContribution.recipient_committee_id.label("committee_id"),
-                    func.count(GoldContribution.id).label("total_contributions_received"),
-                    func.coalesce(func.sum(GoldContribution.amount), 0).label("total_amount_received"),
-                    func.count(func.distinct(GoldContribution.contributor_id)).label(
-                        "unique_contributors"
-                    ),
-                    func.coalesce(func.avg(GoldContribution.amount), 0).label("avg_contribution"),
+                    literal_column("committee_id").label("committee_id"),
+                    literal_column("total_contributions").label("total_contributions_received"),
+                    literal_column("total_amount").label("total_amount_received"),
+                    literal_column("unique_contributors").label("unique_contributors"),
+                    literal_column("avg_contribution").label("avg_contribution"),
                 )
-                .group_by(GoldContribution.recipient_committee_id)
+                .select_from(text("mv_committee_stats"))
                 .subquery()
             )
 
@@ -308,28 +307,39 @@ class CommitteeService:
 
     @staticmethod
     def get_committee_stats(db: Session, committee_id: int) -> CommitteeStats | None:
-        """Get aggregated statistics for a committee."""
+        """Get aggregated statistics for a committee.
+
+        Uses mv_committee_stats materialized view for performance.
+        Stats exclude earmarked contributions for accurate totals.
+        """
         # Verify committee exists
-        result = CommitteeService.get_committee_by_id(db, committee_id)
-        if not result:
+        committee_result = CommitteeService.get_committee_by_id(db, committee_id)
+        if not committee_result:
             return None
 
-        # Query contribution statistics
-        stats_query = select(
-            func.count(GoldContribution.id).label("total_contributions_received"),
-            func.coalesce(func.sum(GoldContribution.amount), 0).label("total_amount_received"),
-            func.count(func.distinct(GoldContribution.contributor_id)).label(
-                "unique_contributors"
-            ),
-            func.coalesce(func.avg(GoldContribution.amount), 0).label("avg_contribution"),
-        ).where(GoldContribution.recipient_committee_id == committee_id)
+        # Query from materialized view for fast lookup
+        stats_query = text("""
+            SELECT total_contributions, total_amount, unique_contributors, avg_contribution
+            FROM mv_committee_stats
+            WHERE committee_id = :committee_id
+        """)
 
-        result = db.execute(stats_query).one()
+        result = db.execute(stats_query, {"committee_id": committee_id}).one_or_none()
+
+        if not result:
+            # Committee exists but has no contributions (or all are earmarked)
+            return CommitteeStats(
+                committee_id=committee_id,
+                total_contributions_received=0,
+                total_amount_received=0.0,
+                unique_contributors=0,
+                avg_contribution=0.0,
+            )
 
         return CommitteeStats(
             committee_id=committee_id,
-            total_contributions_received=result.total_contributions_received,
-            total_amount_received=float(result.total_amount_received),
+            total_contributions_received=result.total_contributions,
+            total_amount_received=float(result.total_amount),
             unique_contributors=result.unique_contributors,
             avg_contribution=float(result.avg_contribution),
         )

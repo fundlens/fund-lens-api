@@ -33,6 +33,10 @@ def list_candidates(
         pagination: Annotated[PaginationParams, Depends()],
         filters: Annotated[CandidateFilters, Depends()],
         include_stats: Annotated[bool, Query(description="Include fundraising statistics")] = False,
+        sort_by: Annotated[
+            str, Query(description="Sort by: name, total_amount, total_contributions")
+        ] = "name",
+        order: Annotated[str, Query(description="Sort order: asc, desc")] = "asc",
         fields: Annotated[
             str | None,
             Query(
@@ -53,13 +57,27 @@ def list_candidates(
     - Use the 'fields' parameter to select specific fields (e.g., ?fields=id,name,party)
     - Omit the 'fields' parameter to get all fields
     - Include fundraising statistics with include_stats=true
+    - Sort by name, total_amount, or total_contributions
     """
+    # Validate sort_by parameter
+    if sort_by not in ("name", "total_amount", "total_contributions"):
+        raise HTTPException(
+            status_code=400,
+            detail="sort_by must be one of: name, total_amount, total_contributions",
+        )
+
+    # Validate order parameter
+    if order not in ("asc", "desc"):
+        raise HTTPException(status_code=400, detail="order must be 'asc' or 'desc'")
+
     candidates, total_count = CandidateService.list_candidates(
         db=db,
         filters=filters,
         offset=pagination.offset,
         limit=pagination.page_size,
         include_stats=include_stats,
+        sort_by=sort_by,  # type: ignore
+        order=order,  # type: ignore
     )
 
     # Apply field selection if requested
